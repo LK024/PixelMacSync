@@ -80,9 +80,10 @@ L’app Android agisce come **Peripheral / GATT Server** ed è ottimizzata per l
 * **MacroDroid bridge**: delega l’attivazione/disattivazione dell’hotspot a MacroDroid tramite `Intent Broadcast`.
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/1a3caa7b-d75c-4b5b-8d17-f07829351716" width="300" />
-  <img src="https://github.com/user-attachments/assets/cd07089a-2362-41d9-a85e-0e1a90a205dc" width="300" />
+  <img src="https://github.com/user-attachments/assets/a55d6e95-bf33-423b-8b50-254c783abc28" width="300" />
+  <img src="https://github.com/user-attachments/assets/10e7dae0-ad07-421b-b3c2-7bff0fce7c6e" width="300" />
 </p>
+
 
 ### 💻 macOS Client — PixelSync
 
@@ -244,9 +245,10 @@ The Android app acts as the **Peripheral / GATT Server** and is optimized for th
 * **MacroDroid Bridge**: Delegates hotspot activation/deactivation to MacroDroid via `Intent Broadcast`.
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/1a3caa7b-d75c-4b5b-8d17-f07829351716" width="300" />
-  <img src="https://github.com/user-attachments/assets/cd07089a-2362-41d9-a85e-0e1a90a205dc" width="300" />
+  <img src="https://github.com/user-attachments/assets/a55d6e95-bf33-423b-8b50-254c783abc28" width="300" />
+  <img src="https://github.com/user-attachments/assets/10e7dae0-ad07-421b-b3c2-7bff0fce7c6e" width="300" />
 </p>
+
 
 ### 💻 macOS Client — PixelSync
 
