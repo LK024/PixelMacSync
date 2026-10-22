@@ -102,6 +102,9 @@ Il pacchetto telemetrico è formattato in questo ordine:
 Le notifiche vengono inoltrate con prefisso `POST\u001F` o `REMOVE\u001F`.
 Il canale comandi supporta `HOTSPOT_ON`, `HOTSPOT_OFF`, `SYNC_REQ` e `KILL\u001F[ID_Notifica]`.
 
+Tutte le caratteristiche richiedono un **link cifrato**: solo un Mac abbinato al telefono può leggere telemetria e notifiche o inviare comandi.
+I pacchetti vengono inviati uno alla volta e, se superano l'MTU negoziato, troncati senza spezzare caratteri UTF-8.
+
 ---
 
 ## 🛠 Setup e Configurazione
@@ -124,6 +127,7 @@ Il canale comandi supporta `HOTSPOT_ON`, `HOTSPOT_OFF`, `SYNC_REQ` e `KILL\u001F
 2. Per consentire il salvataggio del file `app_mappings.json` nella cartella utente, disabilita l’**App Sandbox** in *Signing & Capabilities* prima della build.
 3. Al primo avvio, concedi il permesso per le Notifiche di macOS.
 4. Il sistema scansionerà automaticamente il BLE e richiederà il primo *Reconnection Sync*.
+5. Al primo collegamento compare una **richiesta di abbinamento Bluetooth** su Mac e telefono: accettala su entrambi. Da quel momento PixelSync si collega solo a quel telefono (per cambiarlo: clic sull'icona del telefono o dell'antenna → *Dimentica telefono associato*).
 
 ---
 

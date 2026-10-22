@@ -31,7 +31,26 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
     @Published var networkType: String = "---"
     @Published var signalStrength: Int = 0
     @Published var isWifi: Bool = false
-    @Published var isHotspotActive: Bool = false
+    // Si cambia solo con setRemoteHotspot(enable:), mai scrivendolo direttamente dalla UI
+    @Published private(set) var isHotspotActive: Bool = false
+
+    // Dopo un comando hotspot il telefono impiega qualche secondo ad applicarlo:
+    // nel frattempo la telemetria riporta ancora il vecchio stato e non deve sovrascrivere il toggle
+    private var pendingHotspotState: Bool?
+    private var pendingHotspotDeadline = Date.distantPast
+
+    // --- TELEFONO FIDATO ---
+    // Dopo il primo abbinamento riuscito ci colleghiamo solo a quel telefono, non a chiunque pubblicizzi il nostro UUID
+    private let trustedPeripheralKey = "trustedPeripheralID"
+    @Published private(set) var hasTrustedPhone = false
+
+    private var trustedPeripheralID: UUID? {
+        get { UserDefaults.standard.string(forKey: trustedPeripheralKey).flatMap(UUID.init(uuidString:)) }
+        set {
+            UserDefaults.standard.set(newValue?.uuidString, forKey: trustedPeripheralKey)
+            hasTrustedPhone = newValue != nil
+        }
+    }
 
     // Calcolo del percorso del file JSON nella cartella Documenti
     var configURL: URL? {
@@ -48,6 +67,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
 
     override init() {
         super.init()
+        hasTrustedPhone = trustedPeripheralID != nil
         centralManager = CBCentralManager(delegate: self, queue: nil)
         
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
@@ -148,7 +168,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         guard self.pixelPeripheral == nil else { return }
-        
+        if let trusted = trustedPeripheralID, peripheral.identifier != trusted { return }
+
         centralManager.stopScan()
         self.pixelPeripheral = peripheral
         self.pixelPeripheral?.delegate = self
@@ -228,11 +249,27 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
         if let data = commandString.data(using: .utf8) {
             peripheral.writeValue(data, for: characteristic, type: .withResponse)
             print("MacSync: Inviato comando -> \(commandString)")
-            
+
             DispatchQueue.main.async {
                 self.isHotspotActive = enable
+                self.pendingHotspotState = enable
+                self.pendingHotspotDeadline = Date().addingTimeInterval(8)
             }
         }
+    }
+
+    private func applyReportedHotspotState(_ reported: Bool) {
+        if let pending = pendingHotspotState, Date() < pendingHotspotDeadline, reported != pending {
+            return // Il telefono non ha ancora applicato il comando: teniamo lo stato richiesto
+        }
+        pendingHotspotState = nil
+        isHotspotActive = reported
+    }
+
+    func forgetTrustedPhone() {
+        print("MacSync: Telefono fidato dimenticato. Il prossimo telefono abbinato diventerà quello fidato.")
+        trustedPeripheralID = nil
+        forceRestartBluetooth()
     }
     
     func startScanningOrReconnect() {
@@ -247,8 +284,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
         self.commandCharacteristic = nil
         
         let systemConnected = centralManager.retrieveConnectedPeripherals(withServices: [serviceUUID])
-        
-        if let peripheral = systemConnected.first {
+        let trusted = trustedPeripheralID
+
+        if let peripheral = systemConnected.first(where: { trusted == nil || $0.identifier == trusted }) {
             self.pixelPeripheral = peripheral
             self.pixelPeripheral?.delegate = self
             connectionStatus = "Connessione (Cache)..."
@@ -360,12 +398,23 @@ extension BLEManager: CBPeripheralDelegate {
     }
     
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        
-        if characteristic.uuid == telemetryUUID, let data = characteristic.value,
-           let payload = String(data: data, encoding: .utf8) {
-            
+        if let error = error {
+            // Es. abbinamento rifiutato: Android risponde "Insufficient Authentication"
+            print("MacSync: Errore lettura \(characteristic.uuid): \(error.localizedDescription)")
+            return
+        }
+
+        if characteristic.uuid == telemetryUUID, let data = characteristic.value {
+            // Le caratteristiche Android sono cifrate: se la lettura riesce il telefono è abbinato, lo memorizziamo come fidato
+            if trustedPeripheralID == nil {
+                trustedPeripheralID = peripheral.identifier
+                print("MacSync: Telefono fidato memorizzato (\(peripheral.identifier))")
+            }
+
+            // decoding:as: sostituisce eventuali byte UTF-8 non validi invece di scartare l'intero pacchetto
+            let payload = String(decoding: data, as: UTF8.self)
             let parts = payload.components(separatedBy: "\u{001F}")
-            
+
             DispatchQueue.main.async {
                 // 🚀 Gestisce correttamente il nome dispositivo inviato da Android
                 if parts.count >= 7 {
@@ -374,14 +423,15 @@ extension BLEManager: CBPeripheralDelegate {
                     self.networkType = parts[2]
                     self.signalStrength = Int(parts[3]) ?? 0
                     self.isWifi = (parts[4] == "true")
-                    self.isHotspotActive = (parts[5] == "true")
+                    self.applyReportedHotspotState(parts[5] == "true")
                     self.deviceName = parts[6]
                 }
             }
         }
-        
+
         if characteristic.uuid == notificationsUUID {
-            if let data = characteristic.value, let payload = String(data: data, encoding: .utf8) {
+            if let data = characteristic.value {
+                let payload = String(decoding: data, as: UTF8.self)
                 let parts = payload.components(separatedBy: "\u{001F}")
                 guard !parts.isEmpty else { return }
                 

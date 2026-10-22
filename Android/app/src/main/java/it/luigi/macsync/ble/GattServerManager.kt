@@ -10,6 +10,7 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -19,6 +20,8 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.BatteryManager
+import android.os.Handler
+import android.os.Looper
 import android.telephony.SignalStrength
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyDisplayInfo
@@ -54,6 +57,25 @@ class GattServerManager private constructor(private val context: Context) {
     private val NOTIFICATIONS_UUID = UUID.fromString("22222222-73F5-4BC4-A12F-17D1AD07A961")
     private val COMMAND_UUID = UUID.fromString("44444444-73F5-4BC4-A12F-17D1AD07A961")
     private var notificationsCharacteristic: BluetoothGattCharacteristic? = null
+
+    // --- CODA DI INVIO BLE ---
+    // Android accetta una sola notify alla volta: la successiva parte solo dopo onNotificationSent.
+    // Tutto lo stato della coda vive sul main thread (le callback GATT arrivano su thread binder).
+    private data class PendingNotify(val characteristic: BluetoothGattCharacteristic, val payload: String, var attempts: Int = 0)
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val sendQueue = ArrayDeque<PendingNotify>()
+    private var isSending = false
+    // La telemetria non entra in coda: conta solo l'ultimo valore, e solo se è cambiato
+    private var pendingTelemetry: String? = null
+    private var lastTelemetryPayload: String? = null
+    // MTU negoziato per dispositivo (23 è il minimo BLE finché il Mac non ne chiede uno più grande)
+    private val mtuByAddress = mutableMapOf<String, Int>()
+    private val sendTimeout = Runnable {
+        Log.w("MacSync", "onNotificationSent non arrivato in tempo, sblocco la coda")
+        isSending = false
+        drainQueue()
+    }
 
     private val _connectionState = MutableStateFlow("In attesa di connessione...")
     val connectionState: StateFlow<String> = _connectionState
@@ -197,55 +219,141 @@ class GattServerManager private constructor(private val context: Context) {
         }
     }
 
-    private fun notifyMacTelemetry() {
-        val mac = connectedMac
-        val characteristic = telemetryCharacteristic
+    private fun buildTelemetryPayload(): String {
+        val networkStringToUse = if (isWifiConnected) wifiSSID else currentCellularNetwork
+        return "$currentBatteryLevel\u001F$isCharging\u001F$networkStringToUse\u001F$currentSignal\u001F$isWifiConnected\u001F$isHotspotActive\u001F${android.os.Build.MODEL}"
+    }
 
-        if (mac != null && characteristic != null && gattServer != null) {
-            val networkStringToUse = if (isWifiConnected) wifiSSID else currentCellularNetwork
-            val payload = "$currentBatteryLevel\u001F$isCharging\u001F$networkStringToUse\u001F$currentSignal\u001F$isWifiConnected\u001F$isHotspotActive\u001F${android.os.Build.MODEL}"
-            val data = payload.toByteArray(Charsets.UTF_8)
-            gattServer?.notifyCharacteristicChanged(mac, characteristic, false, data)
+    private fun notifyMacTelemetry() {
+        // Chiamata anche dal thread di ConnectivityManager: passiamo sempre dal main thread
+        mainHandler.post {
+            if (connectedMac == null) return@post
+            val payload = buildTelemetryPayload()
+            // Batteria e segnale cambiano spesso senza che il valore inviato cambi: niente invii inutili
+            if (payload == lastTelemetryPayload) return@post
+            lastTelemetryPayload = payload
+            pendingTelemetry = payload
+            drainQueue()
         }
     }
 
     fun sendNotificationToMac(payload: String) {
-        val mac = connectedMac
-        val characteristic = notificationsCharacteristic
-
-        if (mac != null && characteristic != null && gattServer != null) {
-            val safePayload = payload.take(150).toByteArray()
-            gattServer?.notifyCharacteristicChanged(mac, characteristic, false, safePayload)
+        mainHandler.post {
+            val characteristic = notificationsCharacteristic
+            if (connectedMac == null || characteristic == null) return@post
+            sendQueue.addLast(PendingNotify(characteristic, payload))
+            drainQueue()
         }
+    }
+
+    private fun takePendingTelemetry(): PendingNotify? {
+        val payload = pendingTelemetry ?: return null
+        val characteristic = telemetryCharacteristic ?: return null
+        pendingTelemetry = null
+        return PendingNotify(characteristic, payload)
+    }
+
+    private fun drainQueue() {
+        if (isSending) return
+        val mac = connectedMac ?: return
+        val server = gattServer ?: return
+        val next = sendQueue.removeFirstOrNull() ?: takePendingTelemetry() ?: return
+
+        val data = fitToMtu(next.payload, mtuByAddress[mac.address] ?: 23)
+        val status = server.notifyCharacteristicChanged(mac, next.characteristic, false, data)
+
+        if (status == BluetoothStatusCodes.SUCCESS) {
+            isSending = true
+            mainHandler.postDelayed(sendTimeout, 1000)
+        } else {
+            Log.w("MacSync", "Notify rifiutata (status $status), tentativo ${next.attempts + 1}")
+            next.attempts++
+            if (next.attempts < 3) sendQueue.addFirst(next)
+            mainHandler.postDelayed({ drainQueue() }, 100)
+        }
+    }
+
+    // Una notify può contenere al massimo MTU - 3 byte. Tagliamo sui confini UTF-8:
+    // un'emoji spezzata a metà renderebbe il pacchetto illeggibile sul Mac.
+    private fun fitToMtu(payload: String, mtu: Int): ByteArray {
+        val bytes = payload.toByteArray(Charsets.UTF_8)
+        val maxLength = mtu - 3
+        if (bytes.size <= maxLength) return bytes
+
+        val ellipsis = "…".toByteArray(Charsets.UTF_8)
+        var cut = maxLength - ellipsis.size
+        while (cut > 0 && (bytes[cut].toInt() and 0xC0) == 0x80) cut--
+        return bytes.copyOf(cut) + ellipsis
+    }
+
+    private fun resetLinkState() {
+        mainHandler.removeCallbacks(sendTimeout)
+        connectedMac = null
+        sendQueue.clear()
+        pendingTelemetry = null
+        lastTelemetryPayload = null
+        isSending = false
     }
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             super.onConnectionStateChange(device, status, newState)
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                connectedMac = device
-                _connectionState.value = "Connesso al Mac! \uD83C\uDF4F"
-                notifyMacTelemetry()
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                connectedMac = null
-                _connectionState.value = "Disconnesso. In attesa..."
+            // Il collegamento da solo non basta: il Mac diventa "connectedMac" solo quando si iscrive
+            // alle notify, cosa che lo stack consente unicamente su un link cifrato (dispositivo associato)
+            if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                mainHandler.post {
+                    mtuByAddress.remove(device.address)
+                    if (device == connectedMac) {
+                        resetLinkState()
+                        _connectionState.value = "Disconnesso. In attesa..."
+                    }
+                }
+            }
+        }
+
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            super.onMtuChanged(device, mtu)
+            mainHandler.post { mtuByAddress[device.address] = mtu }
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            super.onNotificationSent(device, status)
+            mainHandler.post {
+                mainHandler.removeCallbacks(sendTimeout)
+                isSending = false
+                drainQueue()
             }
         }
 
         override fun onCharacteristicReadRequest(device: BluetoothDevice, requestId: Int, offset: Int, characteristic: BluetoothGattCharacteristic) {
             super.onCharacteristicReadRequest(device, requestId, offset, characteristic)
             if (characteristic.uuid == TELEMETRY_UUID) {
-                val networkStringToUse = if (isWifiConnected) wifiSSID else currentCellularNetwork
-                val payload = "$currentBatteryLevel\u001F$isCharging\u001F$networkStringToUse\u001F$currentSignal\u001F$isWifiConnected\u001F$isHotspotActive\u001F${android.os.Build.MODEL}"
-                val data = payload.toByteArray(Charsets.UTF_8)
-                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
+                // Se il valore supera l'MTU il Mac lo legge a pezzi (long read): rispondiamo dall'offset richiesto
+                val data = buildTelemetryPayload().toByteArray(Charsets.UTF_8)
+                val chunk = if (offset < data.size) data.copyOfRange(offset, data.size) else ByteArray(0)
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, chunk)
+            } else {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_READ_NOT_PERMITTED, offset, null)
             }
         }
 
         override fun onDescriptorWriteRequest(device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor, preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray) {
             super.onDescriptorWriteRequest(device, requestId, descriptor, preparedWrite, responseNeeded, offset, value)
-            if (descriptor.uuid == CCC_DESCRIPTOR_UUID && responseNeeded) {
-                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            if (descriptor.uuid == CCC_DESCRIPTOR_UUID) {
+                // Arriviamo qui solo su link cifrato: il descrittore \u00E8 *_ENCRYPTED
+                if (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
+                    mainHandler.post {
+                        if (device != connectedMac) {
+                            resetLinkState()
+                            connectedMac = device
+                            _connectionState.value = "Connesso al Mac! \uD83C\uDF4F"
+                        }
+                        notifyMacTelemetry()
+                    }
+                }
+                if (responseNeeded) {
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                }
             }
         }
 
@@ -301,6 +409,8 @@ class GattServerManager private constructor(private val context: Context) {
                 if (responseNeeded) {
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                 }
+            } else if (responseNeeded) {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_WRITE_NOT_PERMITTED, offset, null)
             }
         }
     }
@@ -329,32 +439,34 @@ class GattServerManager private constructor(private val context: Context) {
     private fun setupService() {
         val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
 
+        // Tutti i permessi sono *_ENCRYPTED: un dispositivo non associato riceve "Insufficient Authentication",
+        // il Mac reagisce avviando l'abbinamento (una volta sola) e chiunque altro resta fuori.
         val localTelemetryCharacteristic = BluetoothGattCharacteristic(
             TELEMETRY_UUID,
             BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-            BluetoothGattCharacteristic.PERMISSION_READ
+            BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED
         )
 
         val charNotifications = BluetoothGattCharacteristic(
             NOTIFICATIONS_UUID,
             BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-            BluetoothGattCharacteristic.PERMISSION_READ
+            BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED
         )
 
-        val notifDescriptor = BluetoothGattDescriptor(CCC_DESCRIPTOR_UUID, BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE)
+        val notifDescriptor = BluetoothGattDescriptor(CCC_DESCRIPTOR_UUID, BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED or BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED)
         charNotifications.addDescriptor(notifDescriptor)
         service.addCharacteristic(charNotifications)
         notificationsCharacteristic = charNotifications
 
         val clientConfigDescriptor = BluetoothGattDescriptor(
             CCC_DESCRIPTOR_UUID,
-            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+            BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED or BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED
         )
 
         val commandCharacteristic = BluetoothGattCharacteristic(
             COMMAND_UUID,
             BluetoothGattCharacteristic.PROPERTY_WRITE,
-            BluetoothGattCharacteristic.PERMISSION_WRITE
+            BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED
         )
         service.addCharacteristic(commandCharacteristic)
 
@@ -376,5 +488,10 @@ class GattServerManager private constructor(private val context: Context) {
         telephonyManager.unregisterTelephonyCallback(telephonyCallback)
         connectivityManager.unregisterNetworkCallback(networkCallback)
         gattServer?.close()
+        gattServer = null
+        mainHandler.post {
+            resetLinkState()
+            mtuByAddress.clear()
+        }
     }
 }
