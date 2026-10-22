@@ -22,7 +22,7 @@ class BLEAdvertiser(context: Context) {
     // Variabile di sicurezza per non avviare due volte l'antenna
     private var isAdvertising = false
 
-    private val serviceUUID = UUID.fromString("E20A39F4-73F5-4BC4-A12F-17D1AD07A961")
+    private val serviceUUID = UUID.fromString("58DF214B-9942-45A5-BAF9-7B24F5D0232C")
 
     // BALANCED (~250 ms) basta al Mac per trovarci in un attimo e consuma molto meno di LOW_LATENCY (~100 ms).
     // L'advertising resta acceso solo finché il Mac non è collegato (vedi MacSyncBleService).
