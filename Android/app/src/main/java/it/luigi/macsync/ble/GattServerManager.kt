@@ -29,6 +29,7 @@ import android.telephony.TelephonyManager
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import java.io.ByteArrayOutputStream
 import java.util.UUID
 
 @SuppressLint("MissingPermission")
@@ -71,6 +72,9 @@ class GattServerManager private constructor(private val context: Context) {
     private var lastTelemetryPayload: String? = null
     // MTU negoziato per dispositivo (23 è il minimo BLE finché il Mac non ne chiede uno più grande)
     private val mtuByAddress = mutableMapOf<String, Int>()
+    // Scritture lunghe in corso per dispositivo (arrivano su thread binder); 512 byte è il massimo di un attributo GATT
+    private val preparedWrites = java.util.concurrent.ConcurrentHashMap<String, ByteArrayOutputStream>()
+    private val MAX_COMMAND_BYTES = 512
     private val sendTimeout = Runnable {
         Log.w("MacSync", "onNotificationSent non arrivato in tempo, sblocco la coda")
         isSending = false
@@ -82,6 +86,20 @@ class GattServerManager private constructor(private val context: Context) {
 
     private val _connectionState = MutableStateFlow("In attesa di connessione...")
     val connectionState: StateFlow<String> = _connectionState
+
+    // Indirizzo e nome dell'ultimo Mac collegato, ricordati anche da scollegati (servono per associarlo e mostrarlo)
+    private val prefs = context.getSharedPreferences("MacSync_Prefs", Context.MODE_PRIVATE)
+    private val _macAddress = MutableStateFlow(prefs.getString("mac_address", null))
+    val macAddress: StateFlow<String?> = _macAddress
+    private val _macName = MutableStateFlow(prefs.getString("mac_name", null))
+    val macName: StateFlow<String?> = _macName
+
+    // Da chiamare anche dopo una nuova associazione: il nome si può applicare solo a un Mac associato
+    fun applyMacAlias() {
+        val address = _macAddress.value ?: return
+        val name = _macName.value ?: return
+        MacCompanion.applyAlias(context, address, name)
+    }
 
     // --- VARIABILI DI STATO ---
     private var currentBatteryLevel = 0
@@ -280,6 +298,7 @@ class GattServerManager private constructor(private val context: Context) {
             // Il collegamento da solo non basta: il Mac diventa "connectedMac" solo quando si iscrive
             // alle notify, cosa che lo stack consente unicamente su un link cifrato (dispositivo associato)
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                preparedWrites.remove(device.address)
                 mainHandler.post {
                     mtuByAddress.remove(device.address)
                     if (device == connectedMac) {
@@ -328,6 +347,10 @@ class GattServerManager private constructor(private val context: Context) {
                             connectedMac = device
                             _connectionState.value = "Connesso al Mac! \uD83C\uDF4F"
                             onMacLinkChanged?.invoke(true)
+                            if (_macAddress.value != device.address) {
+                                _macAddress.value = device.address
+                                prefs.edit().putString("mac_address", device.address).apply()
+                            }
                         }
                         notifyMacTelemetry()
                     }
@@ -350,48 +373,103 @@ class GattServerManager private constructor(private val context: Context) {
         ) {
             super.onCharacteristicWriteRequest(device, requestId, characteristic, preparedWrite, responseNeeded, offset, value)
 
-            if (characteristic.uuid == COMMAND_UUID && value != null) {
-                val fullCommand = String(value, Charsets.UTF_8)
-                Log.d("MacSync", "Ricevuto pacchetto comandi dal Mac: $fullCommand")
-
-                val parts = fullCommand.split("\u001F")
-                val commandType = parts[0]
-
-                when (commandType) {
-                    "HOTSPOT_ON" -> {
-                        val intent = Intent("it.luigi.macsync.HOTSPOT_ON")
-                        intent.setPackage("com.arlosoft.macrodroid")
-                        context.sendBroadcast(intent)
-                    }
-                    "HOTSPOT_OFF" -> {
-                        val intent = Intent("it.luigi.macsync.HOTSPOT_OFF")
-                        intent.setPackage("com.arlosoft.macrodroid")
-                        context.sendBroadcast(intent)
-                    }
-                    "KILL" -> {
-                        if (parts.size >= 2) {
-                            val notifIdToKill = parts[1]
-                            Log.d("MacSync", "Comando KILL ricevuto. Chiedo l'eliminazione per ID: $notifIdToKill")
-                            val intent = Intent("it.luigi.macsync.KILL_NOTIFICATION")
-                            intent.putExtra("macNotifId", notifIdToKill)
-                            intent.setPackage(context.applicationContext.packageName)
-                            context.sendBroadcast(intent)
-                        }
-                    }
-                    // --- NUOVO COMANDO: RICHIESTA DI SINCRONIZZAZIONE A FREDDO ---
-                    "SYNC_REQ" -> {
-                        Log.d("MacSync", "Il Mac ha richiesto la sincronizzazione a freddo!")
-                        val intent = Intent("it.luigi.macsync.SYNC_REQUEST")
-                        intent.setPackage(context.applicationContext.packageName)
-                        context.sendBroadcast(intent)
-                    }
-                }
-
+            if (characteristic.uuid != COMMAND_UUID || value == null) {
                 if (responseNeeded) {
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_WRITE_NOT_PERMITTED, offset, null)
                 }
-            } else if (responseNeeded) {
-                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_WRITE_NOT_PERMITTED, offset, null)
+                return
+            }
+
+            if (preparedWrite) {
+                // Scrittura lunga (es. una risposta di qualche riga): il Mac la manda a pezzi, la ricomponiamo
+                // e la eseguiamo in onExecuteWrite
+                val buffer = preparedWrites.getOrPut(device.address) { ByteArrayOutputStream() }
+                val status = when {
+                    offset != buffer.size() -> BluetoothGatt.GATT_INVALID_OFFSET
+                    buffer.size() + value.size > MAX_COMMAND_BYTES -> BluetoothGatt.GATT_INVALID_ATTRIBUTE_LENGTH
+                    else -> {
+                        buffer.write(value)
+                        BluetoothGatt.GATT_SUCCESS
+                    }
+                }
+                if (status != BluetoothGatt.GATT_SUCCESS) preparedWrites.remove(device.address)
+                if (responseNeeded) gattServer?.sendResponse(device, requestId, status, offset, value)
+                return
+            }
+
+            handleCommand(String(value, Charsets.UTF_8))
+            if (responseNeeded) {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+            }
+        }
+
+        override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
+            super.onExecuteWrite(device, requestId, execute)
+            val buffer = preparedWrites.remove(device.address)
+            if (execute && buffer != null) handleCommand(String(buffer.toByteArray(), Charsets.UTF_8))
+            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+        }
+    }
+
+    // --- ⚙️ GESTIONE COMANDI IN INGRESSO DAL MAC ---
+    private fun handleCommand(fullCommand: String) {
+        val parts = fullCommand.split("\u001F")
+        val commandType = parts[0]
+        // Solo il tipo di comando nel log: le risposte contengono testo privato
+        Log.d("MacSync", "Ricevuto comando dal Mac: $commandType")
+
+        when (commandType) {
+            "HOTSPOT_ON" -> {
+                val intent = Intent("it.luigi.macsync.HOTSPOT_ON")
+                intent.setPackage("com.arlosoft.macrodroid")
+                context.sendBroadcast(intent)
+            }
+            "HOTSPOT_OFF" -> {
+                val intent = Intent("it.luigi.macsync.HOTSPOT_OFF")
+                intent.setPackage("com.arlosoft.macrodroid")
+                context.sendBroadcast(intent)
+            }
+            "KILL" -> {
+                if (parts.size >= 2) {
+                    val notifIdToKill = parts[1]
+                    Log.d("MacSync", "Comando KILL ricevuto. Chiedo l'eliminazione per ID: $notifIdToKill")
+                    val intent = Intent("it.luigi.macsync.KILL_NOTIFICATION")
+                    intent.putExtra("macNotifId", notifIdToKill)
+                    intent.setPackage(context.applicationContext.packageName)
+                    context.sendBroadcast(intent)
+                }
+            }
+            // ACTION␟ID␟indice pulsante[␟testo della risposta]
+            "ACTION" -> {
+                val actionIndex = parts.getOrNull(2)?.toIntOrNull()
+                if (parts.size >= 3 && actionIndex != null) {
+                    val intent = Intent("it.luigi.macsync.RUN_ACTION")
+                    intent.putExtra("macNotifId", parts[1])
+                    intent.putExtra("actionIndex", actionIndex)
+                    parts.getOrNull(3)?.let { intent.putExtra("replyText", it) }
+                    intent.setPackage(context.applicationContext.packageName)
+                    context.sendBroadcast(intent)
+                }
+            }
+            // MAC_NAME␟nome del computer (es. "MacBook Pro di Luigi")
+            "MAC_NAME" -> {
+                val name = parts.getOrNull(1)?.trim().orEmpty()
+                if (name.isNotEmpty()) {
+                    mainHandler.post {
+                        if (_macName.value != name) {
+                            _macName.value = name
+                            prefs.edit().putString("mac_name", name).apply()
+                        }
+                        applyMacAlias()
+                    }
+                }
+            }
+            // --- NUOVO COMANDO: RICHIESTA DI SINCRONIZZAZIONE A FREDDO ---
+            "SYNC_REQ" -> {
+                Log.d("MacSync", "Il Mac ha richiesto la sincronizzazione a freddo!")
+                val intent = Intent("it.luigi.macsync.SYNC_REQUEST")
+                intent.setPackage(context.applicationContext.packageName)
+                context.sendBroadcast(intent)
             }
         }
     }

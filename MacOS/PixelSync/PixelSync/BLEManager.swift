@@ -4,6 +4,7 @@ import Combine
 import UserNotifications
 import AppKit
 import UniformTypeIdentifiers
+import SystemConfiguration
 
 class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNotificationCenterDelegate {
     var centralManager: CBCentralManager!
@@ -17,6 +18,14 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
     var commandCharacteristic: CBCharacteristic?
 
     private let androidCategoryID = "ANDROID_NOTIFICATION"
+    // Ogni combinazione di pulsanti Android è una categoria macOS, registrata la prima volta che compare
+    private var registeredCategories: [String: UNNotificationCategory] = [:]
+    private var categoriesNeedRefresh = false
+    // Un comando sul canale Bluetooth non può superare 512 byte (limite di un attributo GATT)
+    private let maxCommandBytes = 512
+    // Pulsante in viaggio verso il telefono: se la scrittura fallisce lo segnaliamo e il testo non va perso
+    private var actionInFlight = false
+    private var pendingReplyText: String?
 
     var connectionAttempts = 0
     
@@ -82,6 +91,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
 
         // Senza customDismissAction macOS non avvisa l'app quando l'utente chiude una notifica con la X
         let androidCategory = UNNotificationCategory(identifier: androidCategoryID, actions: [], intentIdentifiers: [], options: [.customDismissAction])
+        registeredCategories[androidCategoryID] = androidCategory
         UNUserNotificationCenter.current().setNotificationCategories([androidCategory])
 
         // Carichiamo la mappa delle app dal file esterno JSON
@@ -411,6 +421,12 @@ extension BLEManager: CBPeripheralDelegate {
                     peripheral.writeValue(data, for: characteristic, type: .withResponse)
                     print("MacSync: Comando SYNC_REQ inviato ad Android.")
                 }
+
+                // Il nome vero del Mac: Android lo mostra nell'app e, se il Mac è associato, nell'elenco Bluetooth
+                if let computerName = SCDynamicStoreCopyComputerName(nil, nil) as String?,
+                   let data = "MAC_NAME\u{001F}\(computerName.prefix(100))".data(using: .utf8) {
+                    peripheral.writeValue(data, for: characteristic, type: .withResponse)
+                }
             }
         }
     }
@@ -455,17 +471,19 @@ extension BLEManager: CBPeripheralDelegate {
                 
                 let action = parts[0]
                 
-                if action == "POST" && parts.count >= 5 {
+                // POST␟ID␟Package␟Pulsanti␟Titolo␟Testo
+                if action == "POST" && parts.count >= 6 {
                     let notifId = parts[1]
                     let bundleId = parts[2]
-                    let title = parts[3]
-                    let body = parts[4]
-                    
+                    let actionsField = parts[3]
+                    let title = parts[4]
+                    let body = parts[5]
+
                     let content = UNMutableNotificationContent()
                     content.title = title
                     content.body = body
                     content.sound = UNNotificationSound.default
-                    content.categoryIdentifier = androidCategoryID
+                    content.categoryIdentifier = categoryIdentifier(forActions: actionsField)
 
                     content.userInfo = [
                         "androidPackage": bundleId,
@@ -485,14 +503,28 @@ extension BLEManager: CBPeripheralDelegate {
                     }
                     
                     let request = UNNotificationRequest(identifier: notifId, content: content, trigger: nil)
-                    UNUserNotificationCenter.current().add(request)
-                    
+                    deliver(request)
+
                 } else if action == "REMOVE" && parts.count >= 2 {
                     let notifId = parts[1]
                     UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notifId])
                     print("MacSync: Rimossa notifica dal Mac (ID: \(notifId))")
                 }
             }
+        }
+    }
+}
+
+extension BLEManager {
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard characteristic.uuid == commandUUID, actionInFlight else { return }
+        actionInFlight = false
+        let replyText = pendingReplyText
+        pendingReplyText = nil
+
+        if let error = error {
+            print("MacSync: Invio pulsante fallito: \(error.localizedDescription)")
+            reportUnsentAction(replyText: replyText, reason: "Il telefono non ha accettato il comando.")
         }
     }
 }
@@ -517,14 +549,106 @@ extension BLEManager {
                     print("MacSync: Pacchetto sconosciuto. Mostro il selettore di applicazioni...")
                     promptUserToSelectApp(for: androidPackage)
                 }
+                sendKillCommand(for: notifId)
             } else if response.actionIdentifier == UNNotificationDismissActionIdentifier {
                 print("MacSync: Notifica chiusa sul Mac per pacchetto: \(androidPackage)")
+                sendKillCommand(for: notifId)
+            } else if response.actionIdentifier.hasPrefix("ACTION_"),
+                      let actionIndex = Int(response.actionIdentifier.dropFirst("ACTION_".count)) {
+                // Pulsante Android (Rispondi, Segna come letto...): lo preme il telefono, che poi aggiorna o chiude la notifica
+                let replyText = (response as? UNTextInputNotificationResponse)?.userText
+                DispatchQueue.main.async {
+                    self.sendAction(index: actionIndex, replyText: replyText, for: notifId)
+                }
+                // Come su iOS: dopo l'azione la notifica sparisce dal Mac
+                center.removeDeliveredNotifications(withIdentifiers: [notifId])
             }
-
-            sendKillCommand(for: notifId)
         }
 
         completionHandler()
+    }
+
+    // MARK: - Pulsanti delle notifiche
+
+    // Restituisce (e registra se nuova) la categoria macOS con i pulsanti ricevuti da Android.
+    // Formato del campo: pulsanti separati da \u{1E}, ognuno "indice\u{1D}tipo\u{1D}nome" (tipo: R risposta, D distruttivo, A azione)
+    private func categoryIdentifier(forActions actionsField: String) -> String {
+        guard !actionsField.isEmpty else { return androidCategoryID }
+
+        let identifier = androidCategoryID + "|" + actionsField
+            .replacingOccurrences(of: "\u{001E}", with: "|")
+            .replacingOccurrences(of: "\u{001D}", with: ":")
+        if registeredCategories[identifier] != nil { return identifier }
+
+        let actions: [UNNotificationAction] = actionsField.components(separatedBy: "\u{001E}").compactMap { entry in
+            let fields = entry.components(separatedBy: "\u{001D}")
+            guard fields.count >= 3, let index = Int(fields[0]) else { return nil }
+            let actionID = "ACTION_\(index)"
+            switch fields[1] {
+            case "R":
+                return UNTextInputNotificationAction(identifier: actionID, title: fields[2], options: [],
+                                                     textInputButtonTitle: "Invia", textInputPlaceholder: "Rispondi…")
+            case "D":
+                return UNNotificationAction(identifier: actionID, title: fields[2], options: [.destructive])
+            default:
+                return UNNotificationAction(identifier: actionID, title: fields[2], options: [])
+            }
+        }
+        registeredCategories[identifier] = UNNotificationCategory(identifier: identifier, actions: actions,
+                                                                  intentIdentifiers: [], options: [.customDismissAction])
+        categoriesNeedRefresh = true
+        return identifier
+    }
+
+    private func deliver(_ request: UNNotificationRequest) {
+        let center = UNUserNotificationCenter.current()
+        guard categoriesNeedRefresh else {
+            center.add(request)
+            return
+        }
+        categoriesNeedRefresh = false
+        center.setNotificationCategories(Set(registeredCategories.values))
+        // La registrazione è asincrona: aspettiamo che sia attiva, altrimenti la notifica comparirebbe senza pulsanti
+        center.getNotificationCategories { _ in
+            center.add(request)
+        }
+    }
+
+    // ACTION␟ID␟indice pulsante[␟testo della risposta]
+    private func sendAction(index: Int, replyText: String?, for notifId: String) {
+        var command = "ACTION\u{001F}\(notifId)\u{001F}\(index)"
+        if let replyText = replyText {
+            command += "\u{001F}" + replyText.replacingOccurrences(of: "\u{001F}", with: " ")
+        }
+
+        guard let peripheral = pixelPeripheral, let characteristic = commandCharacteristic, peripheral.state == .connected else {
+            reportUnsentAction(replyText: replyText, reason: "Il telefono non è collegato.")
+            return
+        }
+        guard let data = command.data(using: .utf8), data.count <= maxCommandBytes else {
+            reportUnsentAction(replyText: replyText, reason: "La risposta è troppo lunga (massimo circa 450 caratteri).")
+            return
+        }
+
+        // Oltre l'MTU CoreBluetooth la spezza da solo in una scrittura lunga, che Android ricompone
+        actionInFlight = true
+        pendingReplyText = replyText
+        peripheral.writeValue(data, for: characteristic, type: .withResponse)
+        print("MacSync: Inviato pulsante \(index) per la notifica \(notifId)")
+    }
+
+    // Non perdiamo mai un testo scritto: lo copiamo negli appunti e avvisiamo con una notifica
+    private func reportUnsentAction(replyText: String?, reason: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Azione non inviata al telefono"
+        if let replyText = replyText, !replyText.isEmpty {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(replyText, forType: .string)
+            content.body = reason + " Il testo è stato copiato negli appunti."
+        } else {
+            content.body = reason
+        }
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
     private func sendKillCommand(for notifId: String) {

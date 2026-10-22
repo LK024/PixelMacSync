@@ -6,11 +6,13 @@ import android.content.Intent
 import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -29,6 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import it.luigi.macsync.ble.GattServerManager
+import it.luigi.macsync.ble.MacCompanion
 import it.luigi.macsync.ui.theme.MacSyncTheme
 
 class MainActivity : ComponentActivity() {
@@ -91,9 +94,24 @@ fun MainScreen(gattServerManager: GattServerManager, onOpenNotificationsClick: (
     var permissionsGranted by remember { mutableStateOf(false) }
 
     val statusText by gattServerManager.connectionState.collectAsState()
+    val macAddress by gattServerManager.macAddress.collectAsState()
+    val macName by gattServerManager.macName.collectAsState()
 
     val context = LocalContext.current
     val isListenerGranted = isNotificationServiceEnabled(context)
+
+    var isMacAssociated by remember(macAddress) {
+        mutableStateOf(macAddress?.let { MacCompanion.isAssociated(context, it) } ?: false)
+    }
+    val onMacAssociated = {
+        isMacAssociated = true
+        gattServerManager.applyMacAlias()
+        Toast.makeText(context, "Mac associato", Toast.LENGTH_SHORT).show()
+    }
+    // Il dialogo di sistema "Consentire a MacSync di accedere a..." arriva come IntentSender
+    val associationLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -160,7 +178,7 @@ fun MainScreen(gattServerManager: GattServerManager, onOpenNotificationsClick: (
         Spacer(modifier = Modifier.height(16.dp))
 
         Text(
-            text = "MacBook Pro di Luigi",
+            text = macName ?: "Mac",
             fontSize = 24.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSurface
@@ -228,6 +246,25 @@ fun MainScreen(gattServerManager: GattServerManager, onOpenNotificationsClick: (
                 subtitle = "Sincronizza notifiche con il Mac",
                 onClick = onOpenNotificationsClick
             )
+
+            val address = macAddress
+            if (address != null && !isMacAssociated) {
+                Spacer(modifier = Modifier.height(8.dp))
+                SettingsCardItem(
+                    icon = Icons.Rounded.LaptopMac,
+                    title = "Associa il Mac",
+                    subtitle = "Nome del Mac nel Bluetooth e app protetta dalla chiusura",
+                    onClick = {
+                        MacCompanion.associate(
+                            context = context,
+                            address = address,
+                            onPending = { sender -> associationLauncher.launch(IntentSenderRequest.Builder(sender).build()) },
+                            onCreated = onMacAssociated,
+                            onFailed = { error -> Toast.makeText(context, error, Toast.LENGTH_LONG).show() }
+                        )
+                    }
+                )
+            }
 
             if (!isListenerGranted) {
                 Spacer(modifier = Modifier.height(8.dp))
