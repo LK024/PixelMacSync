@@ -9,7 +9,6 @@ import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.os.ParcelUuid
 import android.util.Log
-import java.util.UUID
 
 class BLEAdvertiser(context: Context) {
 
@@ -22,7 +21,7 @@ class BLEAdvertiser(context: Context) {
     // Variabile di sicurezza per non avviare due volte l'antenna
     private var isAdvertising = false
 
-    private val serviceUUID = UUID.fromString("58DF214B-9942-45A5-BAF9-7B24F5D0232C")
+    private val serviceUUID = BleUuids.get(context).service
 
     // BALANCED (~250 ms) basta al Mac per trovarci in un attimo e consuma molto meno di LOW_LATENCY (~100 ms).
     // L'advertising resta acceso solo finché il Mac non è collegato (vedi MacSyncBleService).

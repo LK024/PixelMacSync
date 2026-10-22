@@ -52,11 +52,12 @@ class GattServerManager private constructor(private val context: Context) {
     private var connectedMac: BluetoothDevice? = null
     private var telemetryCharacteristic: BluetoothGattCharacteristic? = null
 
-    private val SERVICE_UUID = UUID.fromString("58DF214B-9942-45A5-BAF9-7B24F5D0232C")
-    private val TELEMETRY_UUID = UUID.fromString("CEFB6548-6C8A-4D25-A086-C8A69D3F6625")
+    private val uuids = BleUuids.get(context)
+    private val SERVICE_UUID = uuids.service
+    private val TELEMETRY_UUID = uuids.telemetry
     private val CCC_DESCRIPTOR_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-    private val NOTIFICATIONS_UUID = UUID.fromString("6E6C9609-9FFA-42E2-A882-B0C4398D58DE")
-    private val COMMAND_UUID = UUID.fromString("586B06E6-CCC5-44B8-BFD9-5D2514A67842")
+    private val NOTIFICATIONS_UUID = uuids.notifications
+    private val COMMAND_UUID = uuids.command
     private var notificationsCharacteristic: BluetoothGattCharacteristic? = null
 
     // --- CODA DI INVIO BLE ---

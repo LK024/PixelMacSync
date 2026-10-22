@@ -10,10 +10,20 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
     var centralManager: CBCentralManager!
     var pixelPeripheral: CBPeripheral?
     
-    let serviceUUID = CBUUID(string: "58DF214B-9942-45A5-BAF9-7B24F5D0232C")
-    let telemetryUUID = CBUUID(string: "CEFB6548-6C8A-4D25-A086-C8A69D3F6625")
-    let notificationsUUID = CBUUID(string: "6E6C9609-9FFA-42E2-A882-B0C4398D58DE")
-    let commandUUID = CBUUID(string: "586B06E6-CCC5-44B8-BFD9-5D2514A67842")
+    // UUID del protocollo: quelli pubblici del repository, sostituibili senza toccare il codice con un
+    // LocalUUIDs.plist (escluso da git) nella cartella PixelSync, chiavi service/telemetry/notifications/command.
+    // Devono coincidere con ble_uuids.properties dell'app Android.
+    private static let localUUIDs: [String: String] = {
+        guard let url = Bundle.main.url(forResource: "LocalUUIDs", withExtension: "plist"),
+              let values = NSDictionary(contentsOf: url) as? [String: String] else { return [:] }
+        print("MacSync: UUID BLE personalizzati caricati da LocalUUIDs.plist")
+        return values
+    }()
+
+    let serviceUUID = CBUUID(string: BLEManager.localUUIDs["service"] ?? "58DF214B-9942-45A5-BAF9-7B24F5D0232C")
+    let telemetryUUID = CBUUID(string: BLEManager.localUUIDs["telemetry"] ?? "CEFB6548-6C8A-4D25-A086-C8A69D3F6625")
+    let notificationsUUID = CBUUID(string: BLEManager.localUUIDs["notifications"] ?? "6E6C9609-9FFA-42E2-A882-B0C4398D58DE")
+    let commandUUID = CBUUID(string: BLEManager.localUUIDs["command"] ?? "586B06E6-CCC5-44B8-BFD9-5D2514A67842")
     
     var commandCharacteristic: CBCharacteristic?
 
