@@ -98,9 +98,21 @@ fun MainScreen(gattServerManager: GattServerManager, onOpenNotificationsClick: (
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val allGranted = permissions.entries.all { it.value }
-        permissionsGranted = allGranted
-        if (allGranted) {
+
+        // 1. Controlliamo SOLO i permessi vitali per far funzionare l'app
+        val isBluetoothConnectGranted = permissions[Manifest.permission.BLUETOOTH_CONNECT] == true ||
+                permissions[Manifest.permission.BLUETOOTH_CONNECT] == null // Fallback per versioni vecchie
+
+        val isBluetoothAdvertiseGranted = permissions[Manifest.permission.BLUETOOTH_ADVERTISE] == true ||
+                permissions[Manifest.permission.BLUETOOTH_ADVERTISE] == null
+
+        // 2. Se il Bluetooth c'è, la UI è autorizzata a sbloccarsi
+        val essentialGranted = isBluetoothConnectGranted && isBluetoothAdvertiseGranted
+
+        permissionsGranted = essentialGranted
+
+        // 3. Avviamo il servizio in background
+        if (essentialGranted) {
             context.startForegroundService(Intent(context, MacSyncBleService::class.java))
         }
     }
