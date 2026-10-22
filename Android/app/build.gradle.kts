@@ -57,10 +57,6 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
-    // Navigazione e animazioni native
-    implementation("androidx.navigation:navigation-compose:2.8.0")
-    // Caricamento asincrono delle icone (Coil)
-    implementation("io.coil-kt:coil-compose:2.6.0")
     implementation("androidx.compose.material:material-icons-extended")
     // Libreria ufficiale Google per le forme avanzate MD3
     implementation("androidx.graphics:graphics-shapes:1.0.1")

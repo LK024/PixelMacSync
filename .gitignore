@@ -1,2 +1,5 @@
 .DS_Store
 *.jks
+# Build di release e impostazioni utente di Xcode
+Android/app/release/
+xcuserdata/

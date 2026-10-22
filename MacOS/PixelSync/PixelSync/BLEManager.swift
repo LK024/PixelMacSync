@@ -15,7 +15,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
     let commandUUID = CBUUID(string: "44444444-73F5-4BC4-A12F-17D1AD07A961")
     
     var commandCharacteristic: CBCharacteristic?
-    
+
+    private let androidCategoryID = "ANDROID_NOTIFICATION"
+
     var connectionAttempts = 0
     
     // --- DIZIONARIO DINAMICO DELLE APP ---
@@ -38,6 +40,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
     // nel frattempo la telemetria riporta ancora il vecchio stato e non deve sovrascrivere il toggle
     private var pendingHotspotState: Bool?
     private var pendingHotspotDeadline = Date.distantPast
+    // Ultimo stato riportato dal telefono, da applicare quando scade l'attesa del comando
+    private var lastReportedHotspot: Bool?
 
     // --- TELEFONO FIDATO ---
     // Dopo il primo abbinamento riuscito ci colleghiamo solo a quel telefono, non a chiunque pubblicizzi il nostro UUID
@@ -75,7 +79,11 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
         }
         
         UNUserNotificationCenter.current().delegate = self
-        
+
+        // Senza customDismissAction macOS non avvisa l'app quando l'utente chiude una notifica con la X
+        let androidCategory = UNNotificationCategory(identifier: androidCategoryID, actions: [], intentIdentifiers: [], options: [.customDismissAction])
+        UNUserNotificationCenter.current().setNotificationCategories([androidCategory])
+
         // Carichiamo la mappa delle app dal file esterno JSON
         loadAppMap()
         
@@ -259,8 +267,18 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, UNUserNo
     }
 
     private func applyReportedHotspotState(_ reported: Bool) {
+        lastReportedHotspot = reported
         if let pending = pendingHotspotState, Date() < pendingHotspotDeadline, reported != pending {
-            return // Il telefono non ha ancora applicato il comando: teniamo lo stato richiesto
+            // Il telefono non ha ancora applicato il comando: teniamo lo stato richiesto.
+            // Alla scadenza applichiamo l'ultimo stato ricevuto, anche se nel frattempo non arriva altra telemetria
+            // (es. hotspot cambiato dal telefono subito dopo un comando dal Mac).
+            let delay = max(pendingHotspotDeadline.timeIntervalSinceNow, 0) + 0.1
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self = self, self.connectionStatus == "Connesso al Pixel",
+                      let last = self.lastReportedHotspot else { return }
+                self.applyReportedHotspotState(last)
+            }
+            return
         }
         pendingHotspotState = nil
         isHotspotActive = reported
@@ -447,7 +465,8 @@ extension BLEManager: CBPeripheralDelegate {
                     content.title = title
                     content.body = body
                     content.sound = UNNotificationSound.default
-                    
+                    content.categoryIdentifier = androidCategoryID
+
                     content.userInfo = [
                         "androidPackage": bundleId,
                         "notifId": notifId
@@ -487,27 +506,36 @@ extension BLEManager {
         
         if let androidPackage = userInfo["androidPackage"] as? String,
            let notifId = userInfo["notifId"] as? String {
-            
-            print("MacSync: Click rilevato per pacchetto: \(androidPackage)")
-            
-            if let macAppName = appMap[androidPackage] {
-                launchMacApp(named: macAppName)
-            } else {
-                print("MacSync: Pacchetto sconosciuto. Mostro il selettore di applicazioni...")
-                promptUserToSelectApp(for: androidPackage)
+
+            // La X (o "Cancella") chiude solo la notifica; il clic apre anche l'app collegata
+            if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+                print("MacSync: Click rilevato per pacchetto: \(androidPackage)")
+
+                if let macAppName = appMap[androidPackage] {
+                    launchMacApp(named: macAppName)
+                } else {
+                    print("MacSync: Pacchetto sconosciuto. Mostro il selettore di applicazioni...")
+                    promptUserToSelectApp(for: androidPackage)
+                }
+            } else if response.actionIdentifier == UNNotificationDismissActionIdentifier {
+                print("MacSync: Notifica chiusa sul Mac per pacchetto: \(androidPackage)")
             }
-            
-            let killCommand = "KILL\u{001F}\(notifId)"
-            if let data = killCommand.data(using: .utf8),
-               let peripheral = self.pixelPeripheral,
-               let characteristic = self.commandCharacteristic {
-                
-                peripheral.writeValue(data, for: characteristic, type: .withResponse)
-                print("MacSync: Inviato comando di Reverse Dismiss -> \(killCommand)")
-            }
+
+            sendKillCommand(for: notifId)
         }
-        
+
         completionHandler()
+    }
+
+    private func sendKillCommand(for notifId: String) {
+        let killCommand = "KILL\u{001F}\(notifId)"
+        if let data = killCommand.data(using: .utf8),
+           let peripheral = self.pixelPeripheral,
+           let characteristic = self.commandCharacteristic {
+
+            peripheral.writeValue(data, for: characteristic, type: .withResponse)
+            print("MacSync: Inviato comando di Reverse Dismiss -> \(killCommand)")
+        }
     }
     
     private func launchMacApp(named name: String) {

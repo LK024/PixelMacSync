@@ -24,8 +24,10 @@ class BLEAdvertiser(context: Context) {
 
     private val serviceUUID = UUID.fromString("E20A39F4-73F5-4BC4-A12F-17D1AD07A961")
 
+    // BALANCED (~250 ms) basta al Mac per trovarci in un attimo e consuma molto meno di LOW_LATENCY (~100 ms).
+    // L'advertising resta acceso solo finché il Mac non è collegato (vedi MacSyncBleService).
     private val advertiseSettings = AdvertiseSettings.Builder()
-        .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+        .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
         .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
         .setConnectable(true)
         .build()
@@ -42,6 +44,8 @@ class BLEAdvertiser(context: Context) {
 
         override fun onStartFailure(errorCode: Int) {
             Log.e("PixelSync", "Errore nell'avvio dell'advertising: $errorCode")
+            // Se l'avvio è fallito davvero, la prossima chiamata deve poter riprovare
+            if (errorCode != ADVERTISE_FAILED_ALREADY_STARTED) isAdvertising = false
         }
     }
 

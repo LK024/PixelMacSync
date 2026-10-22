@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var bleManager = BLEManager()
+    @ObservedObject var bleManager: BLEManager
     
     // Funzione di supporto corretta per l'icona della batteria
     var batteryIconName: String {

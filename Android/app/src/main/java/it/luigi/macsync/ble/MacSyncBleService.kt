@@ -65,6 +65,11 @@ class MacSyncBleService : Service() {
         gattServerManager = GattServerManager.getInstance(this)
         bleAdvertiser = BLEAdvertiser(this)
 
+        // Da collegati il Mac non ha bisogno di trovarci: niente advertising finché non si scollega
+        gattServerManager.onMacLinkChanged = { isLinked ->
+            if (isLinked) bleAdvertiser.stopAdvertising() else bleAdvertiser.startAdvertising()
+        }
+
         // Registriamo l'ascoltatore del Bluetooth
         val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
         registerReceiver(bluetoothStateReceiver, filter)
@@ -78,6 +83,7 @@ class MacSyncBleService : Service() {
     }
 
     override fun onDestroy() {
+        gattServerManager.onMacLinkChanged = null
         unregisterReceiver(bluetoothStateReceiver)
         gattServerManager.stopServer()
         bleAdvertiser.stopAdvertising()

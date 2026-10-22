@@ -12,7 +12,15 @@ import android.util.Log
 class MacSyncNotificationListener : NotificationListenerService() {
 
     companion object {
-        private val macNotificationIds = mutableMapOf<String, MutableList<String>>()
+        private const val SEPARATOR = "\u001F"
+
+        // ID del Mac -> key della notifica Android, per il comando KILL
+        private val macIdToKey = mutableMapOf<String, String>()
+        // Ultimo "titolo + testo" inviato per ogni key: gli aggiornamenti identici non rimbalzano sul Mac
+        private val lastSentContent = mutableMapOf<String, String>()
+
+        // ID breve e stabile per ogni notifica Android: se l'app la aggiorna, sul Mac viene sostituita invece di duplicata
+        private fun macIdFor(key: String): String = Integer.toHexString(key.hashCode())
     }
 
     // --- 0. RICEVITORE DEL COMANDO "KILL" DAL MAC ---
@@ -20,17 +28,9 @@ class MacSyncNotificationListener : NotificationListenerService() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == "it.luigi.macsync.KILL_NOTIFICATION") {
                 val targetMacId = intent.getStringExtra("macNotifId") ?: return
-                var targetKey: String? = null
-                for ((key, ids) in macNotificationIds) {
-                    if (ids.contains(targetMacId)) {
-                        targetKey = key
-                        break
-                    }
-                }
-                if (targetKey != null) {
-                    cancelNotification(targetKey)
-                    macNotificationIds[targetKey]?.remove(targetMacId)
-                }
+                val targetKey = macIdToKey[targetMacId] ?: return
+                // La pulizia delle mappe avviene in onNotificationRemoved
+                cancelNotification(targetKey)
             }
         }
     }
@@ -65,94 +65,82 @@ class MacSyncNotificationListener : NotificationListenerService() {
 
     // --- 2. LA FOTOGRAFIA E L'INVIO AL MAC ---
     private fun sendSnapshotToMac() {
-        val prefs = applicationContext.getSharedPreferences("MacSync_Prefs", Context.MODE_PRIVATE)
-        val enabledApps = prefs.getStringSet("enabled_apps", setOf()) ?: setOf()
         val currentNotifications = this.activeNotifications ?: return
+        val enabledApps = enabledApps()
 
         for (sbn in currentNotifications) {
-            val packageName = sbn.packageName
-
-            if (packageName == "android" || packageName == "com.android.systemui") continue
-            if (!enabledApps.contains(packageName)) continue
-
-            // Filtro anti-doppioni
-            val isGroupSummary = (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0
-            if (isGroupSummary) continue
-
-            val extras = sbn.notification.extras
-            val title = extras.getString(Notification.EXTRA_TITLE)?.trim() ?: ""
-            val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim() ?: ""
-
-            if (title.isBlank() && text.isBlank()) continue
-
-            // Rigeneriamo un ID per il Mac e lo salviamo nella mappa
-            val uniqueMacId = System.currentTimeMillis().toString(36).takeLast(5) + (10..99).random().toString()
-            val key = sbn.key
-            val idList = macNotificationIds[key] ?: mutableListOf()
-            idList.add(uniqueMacId)
-            macNotificationIds[key] = idList
-
-            // Inviamo il pacchetto esattamente come se fosse una notifica normale
-            val separator = "\u001F"
-            val payload = "POST$separator$uniqueMacId$separator$packageName$separator$title$separator$text"
+            // Il Mac ha appena svuotato il suo centro notifiche: reinviamo tutto, anche se già inviato prima
+            val payload = buildPostPayload(sbn, enabledApps, force = true) ?: continue
             sendToGattServer(payload)
         }
         Log.d("MacSync", "Snapshot inviato con successo al Mac.")
     }
 
-    // --- 3. QUANDO ARRIVA UNA NOTIFICA NORMALE ---
+    // --- 3. QUANDO ARRIVA (O SI AGGIORNA) UNA NOTIFICA ---
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val packageName = sbn.packageName
-
-        val isGroupSummary = (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0
-        if (isGroupSummary) return
-
-        if (packageName == "android" || packageName == "com.android.systemui") return
-
-        val prefs = applicationContext.getSharedPreferences("MacSync_Prefs", Context.MODE_PRIVATE)
-        val enabledApps = prefs.getStringSet("enabled_apps", setOf())
-        if (enabledApps?.contains(packageName) == false) return
-
-        val extras = sbn.notification.extras
-        val title = extras.getString(Notification.EXTRA_TITLE)?.trim() ?: ""
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim() ?: ""
-
-        if (title.isBlank() && text.isBlank()) return
-
-        val uniqueMacId = System.currentTimeMillis().toString(36).takeLast(5) + (10..99).random().toString()
-        val key = sbn.key
-        val idList = macNotificationIds[key] ?: mutableListOf()
-        idList.add(uniqueMacId)
-        macNotificationIds[key] = idList
-
-        val separator = "\u001F"
-        val payload = "POST$separator$uniqueMacId$separator$packageName$separator$title$separator$text"
+        val payload = buildPostPayload(sbn, enabledApps(), force = false) ?: return
         sendToGattServer(payload)
     }
 
     // --- 4. QUANDO LA NOTIFICA VIENE RIMOSSA DAL TELEFONO ---
     override fun onNotificationRemoved(sbn: StatusBarNotification, rankingMap: RankingMap, reason: Int) {
-        val packageName = sbn.packageName
-
-        if (packageName == "android" || packageName == "com.android.systemui") return
-
-        val isUserAction = reason == REASON_CLICK || reason == REASON_CANCEL || reason == REASON_CANCEL_ALL
-        if (!isUserAction) return
-
+        // Qualunque motivo conta (letta da un altro dispositivo, annullata dall'app, scaduta, cliccata...),
+        // ma solo per le notifiche che abbiamo effettivamente inviato al Mac
         val key = sbn.key
-        val idsToRemove = macNotificationIds.remove(key)
+        if (lastSentContent.remove(key) == null) return
 
-        idsToRemove?.forEach { uniqueMacId ->
-            val separator = "\u001F"
-            val payload = "REMOVE$separator$uniqueMacId"
-            sendToGattServer(payload)
-        }
+        val macId = macIdFor(key)
+        macIdToKey.remove(macId)
+        sendToGattServer("REMOVE$SEPARATOR$macId")
     }
 
+    // Restituisce il pacchetto POST da inoltrare, oppure null se la notifica va ignorata
+    private fun buildPostPayload(sbn: StatusBarNotification, enabledApps: Set<String>, force: Boolean): String? {
+        val packageName = sbn.packageName
+        if (packageName == "android" || packageName == "com.android.systemui") return null
+        if (!enabledApps.contains(packageName)) return null
+
+        val notification = sbn.notification
+
+        // Filtro anti-doppioni
+        val isGroupSummary = (notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0
+        if (isGroupSummary) return null
+
+        // Download, navigazione, musica: notifiche permanenti che si aggiornano di continuo e sul Mac sarebbero solo rumore.
+        // Le chiamate in arrivo restano.
+        val isOngoing = (notification.flags and Notification.FLAG_ONGOING_EVENT) != 0
+        if (isOngoing && notification.category != Notification.CATEGORY_CALL) return null
+
+        val extras = notification.extras
+        // Molte app (WhatsApp, Gmail...) usano titoli formattati: getString restituirebbe null
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim() ?: ""
+        // BIG_TEXT, se presente, contiene il testo completo (es. anteprima di una email)
+        val text = (extras.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: extras.getCharSequence(Notification.EXTRA_TEXT))
+            ?.toString()?.trim() ?: ""
+
+        if (title.isBlank() && text.isBlank()) return null
+
+        val key = sbn.key
+        val content = title + SEPARATOR + text
+        if (!force && lastSentContent[key] == content) return null
+        lastSentContent[key] = content
+
+        val macId = macIdFor(key)
+        macIdToKey[macId] = key
+
+        return "POST$SEPARATOR$macId$SEPARATOR$packageName$SEPARATOR${clean(title)}$SEPARATOR${clean(text)}"
+    }
+
+    // Un separatore dentro il testo spezzerebbe il pacchetto sul Mac
+    private fun clean(field: String): String = field.replace(SEPARATOR, " ")
+
+    private fun enabledApps(): Set<String> {
+        val prefs = applicationContext.getSharedPreferences("MacSync_Prefs", Context.MODE_PRIVATE)
+        return prefs.getStringSet("enabled_apps", setOf()) ?: setOf()
+    }
+
+    // Stesso processo: chiamata diretta al server GATT, senza passare da un broadcast
     private fun sendToGattServer(payload: String) {
-        val intent = Intent("it.luigi.macsync.NEW_NOTIFICATION")
-        intent.putExtra("payload", payload)
-        intent.setPackage(applicationContext.packageName)
-        sendBroadcast(intent)
+        GattServerManager.getInstance(applicationContext).sendNotificationToMac(payload)
     }
 }

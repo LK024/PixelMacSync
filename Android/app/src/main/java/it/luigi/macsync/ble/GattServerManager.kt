@@ -77,6 +77,9 @@ class GattServerManager private constructor(private val context: Context) {
         drainQueue()
     }
 
+    // Avvisa (sul main thread) quando il Mac si iscrive o si scollega: serve a spegnere l'advertising mentre siamo collegati
+    var onMacLinkChanged: ((Boolean) -> Unit)? = null
+
     private val _connectionState = MutableStateFlow("In attesa di connessione...")
     val connectionState: StateFlow<String> = _connectionState
 
@@ -86,46 +89,23 @@ class GattServerManager private constructor(private val context: Context) {
     private var currentCellularNetwork = "--"
     private var currentSignal = 0
     private var isWifiConnected = false
-    private var wifiSSID = "Wi-Fi"
     private var isHotspotActive = false
 
     private val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
     private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
 
-    // 1. Ascoltatore del Wi-Fi (Versione Caching Ottimizzata + Fix SSID)
+    // 1. Ascoltatore del Wi-Fi
+    // Niente nome della rete: leggerlo richiede la posizione e accende di continuo l'indicatore sul telefono
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
             super.onCapabilitiesChanged(network, networkCapabilities)
             isWifiConnected = networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-
-            if (isWifiConnected) {
-                try {
-                    // Usiamo il WifiManager interno all'evento per bypassare i blocchi del callback
-                    if (context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-                        val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
-                        val info = wifiManager.connectionInfo
-                        val rawSsid = info?.ssid
-
-                        wifiSSID = if (rawSsid != null && rawSsid != "<unknown ssid>") {
-                            rawSsid.removeSurrounding("\"")
-                        } else {
-                            "Wi-Fi"
-                        }
-                    } else {
-                        wifiSSID = "Wi-Fi"
-                    }
-                } catch (e: Exception) {
-                    Log.e("MacSync", "Errore estrazione Wi-Fi: ${e.message}")
-                    wifiSSID = "Wi-Fi"
-                }
-            }
             notifyMacTelemetry()
         }
 
         override fun onLost(network: Network) {
             isWifiConnected = false
-            wifiSSID = "Wi-Fi" // Resettiamo la cache
             notifyMacTelemetry()
         }
     }
@@ -210,17 +190,8 @@ class GattServerManager private constructor(private val context: Context) {
         }
     }
 
-    private val notificationReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == "it.luigi.macsync.NEW_NOTIFICATION") {
-                val payload = intent.getStringExtra("payload")
-                if (payload != null) sendNotificationToMac(payload)
-            }
-        }
-    }
-
     private fun buildTelemetryPayload(): String {
-        val networkStringToUse = if (isWifiConnected) wifiSSID else currentCellularNetwork
+        val networkStringToUse = if (isWifiConnected) "Wi-Fi" else currentCellularNetwork
         return "$currentBatteryLevel\u001F$isCharging\u001F$networkStringToUse\u001F$currentSignal\u001F$isWifiConnected\u001F$isHotspotActive\u001F${android.os.Build.MODEL}"
     }
 
@@ -260,7 +231,14 @@ class GattServerManager private constructor(private val context: Context) {
         val next = sendQueue.removeFirstOrNull() ?: takePendingTelemetry() ?: return
 
         val data = fitToMtu(next.payload, mtuByAddress[mac.address] ?: 23)
-        val status = server.notifyCharacteristicChanged(mac, next.characteristic, false, data)
+        val status = try {
+            server.notifyCharacteristicChanged(mac, next.characteristic, false, data)
+        } catch (e: IllegalArgumentException) {
+            // Un pacchetto rifiutato dallo stack non deve mai far cadere il servizio: lo scartiamo e andiamo avanti
+            Log.e("MacSync", "Notify scartata (${data.size} byte): ${e.message}")
+            mainHandler.post { drainQueue() }
+            return
+        }
 
         if (status == BluetoothStatusCodes.SUCCESS) {
             isSending = true
@@ -273,11 +251,12 @@ class GattServerManager private constructor(private val context: Context) {
         }
     }
 
-    // Una notify può contenere al massimo MTU - 3 byte. Tagliamo sui confini UTF-8:
-    // un'emoji spezzata a metà renderebbe il pacchetto illeggibile sul Mac.
+    // Una notify può contenere al massimo MTU - 3 byte, e comunque mai più di 512 (limite di un attributo GATT:
+    // con un MTU grande, es. 517, MTU - 3 farebbe 514 e Android lancerebbe un'eccezione).
+    // Tagliamo sui confini UTF-8: un'emoji spezzata a metà renderebbe il pacchetto illeggibile sul Mac.
     private fun fitToMtu(payload: String, mtu: Int): ByteArray {
         val bytes = payload.toByteArray(Charsets.UTF_8)
-        val maxLength = mtu - 3
+        val maxLength = minOf(mtu - 3, 512)
         if (bytes.size <= maxLength) return bytes
 
         val ellipsis = "…".toByteArray(Charsets.UTF_8)
@@ -306,6 +285,7 @@ class GattServerManager private constructor(private val context: Context) {
                     if (device == connectedMac) {
                         resetLinkState()
                         _connectionState.value = "Disconnesso. In attesa..."
+                        onMacLinkChanged?.invoke(false)
                     }
                 }
             }
@@ -347,6 +327,7 @@ class GattServerManager private constructor(private val context: Context) {
                             resetLinkState()
                             connectedMac = device
                             _connectionState.value = "Connesso al Mac! \uD83C\uDF4F"
+                            onMacLinkChanged?.invoke(true)
                         }
                         notifyMacTelemetry()
                     }
@@ -425,7 +406,6 @@ class GattServerManager private constructor(private val context: Context) {
         setupService()
 
         context.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        context.registerReceiver(notificationReceiver, IntentFilter("it.luigi.macsync.NEW_NOTIFICATION"), Context.RECEIVER_NOT_EXPORTED)
         context.registerReceiver(hotspotReceiver, IntentFilter("android.net.wifi.WIFI_AP_STATE_CHANGED"))
 
         connectivityManager.registerDefaultNetworkCallback(networkCallback)
@@ -482,7 +462,6 @@ class GattServerManager private constructor(private val context: Context) {
         isServerRunning = false
 
         context.unregisterReceiver(batteryReceiver)
-        context.unregisterReceiver(notificationReceiver)
         context.unregisterReceiver(hotspotReceiver)
 
         telephonyManager.unregisterTelephonyCallback(telephonyCallback)
