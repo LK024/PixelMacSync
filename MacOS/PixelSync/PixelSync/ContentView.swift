@@ -3,20 +3,6 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var bleManager: BLEManager
     
-    // Funzione di supporto corretta per l'icona della batteria
-    var batteryIconName: String {
-        if bleManager.isCharging {
-            return "battery.100.bolt"
-        }
-       
-        let level = Int(bleManager.batteryLevel.replacingOccurrences(of: "%", with: "")) ?? 50
-        if level <= 12 { return "battery.0" }
-        if level <= 37 { return "battery.25" }
-        if level <= 62 { return "battery.50" }
-        if level <= 87 { return "battery.75" }
-        return "battery.100"
-    }
-    
     var body: some View {
         VStack(spacing: 16) {
             
@@ -84,16 +70,11 @@ struct ContentView: View {
                             .foregroundColor(.primary)
                     }
                     
-                    // Batteria
-                    HStack(spacing: 4) {
-                        Text(bleManager.batteryLevel)
-                            .font(.caption)
-                            .monospacedDigit().fixedSize(horizontal: true, vertical: false)
-                        
-                        Image(systemName: batteryIconName)
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundColor(bleManager.isCharging ? .green : (levelColor(for: bleManager.batteryLevel)))
-                    }
+                    // Batteria, nello stile dell'indicatore di macOS accanto all'icona di PixelSync
+                    BatteryBadge(
+                        level: Int(bleManager.batteryLevel.replacingOccurrences(of: "%", with: "")),
+                        isCharging: bleManager.isCharging
+                    )
                     .padding(.leading, 4)
                 }
             }
@@ -125,11 +106,5 @@ struct ContentView: View {
         Button("Dimentica telefono associato") {
             bleManager.forgetTrustedPhone()
         }
-    }
-
-    func levelColor(for levelStr: String) -> Color {
-        let level = Int(levelStr.replacingOccurrences(of: "%", with: "")) ?? 50
-        if level <= 20 { return .red }
-        return .primary
     }
 }
