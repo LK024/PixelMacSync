@@ -6,6 +6,14 @@ struct BatteryBadge: View {
     let level: Int?
     let isCharging: Bool
 
+    @Environment(\.colorScheme) private var colorScheme
+
+    // Colore esplicito invece di .primary: nel pannello della barra dei menu i colori di sistema sono "vibranti"
+    // (fusi con lo sfondo) e, dentro il livello che ritaglia il numero, risulterebbero spenti
+    private var ink: Color {
+        colorScheme == .dark ? .white : .black
+    }
+
     private var fraction: CGFloat {
         CGFloat(min(max(level ?? 0, 0), 100)) / 100
     }
@@ -13,14 +21,14 @@ struct BatteryBadge: View {
     private var fillColor: Color {
         if isCharging { return .green }
         if let level = level, level <= 20 { return .red }
-        return .primary
+        return ink
     }
 
     var body: some View {
         HStack(spacing: 1.5) {
             ZStack(alignment: .leading) {
                 Rectangle()
-                    .fill(Color.primary.opacity(0.3))
+                    .fill(ink.opacity(0.3))
                 GeometryReader { geometry in
                     Rectangle()
                         .fill(fillColor)
@@ -39,7 +47,7 @@ struct BatteryBadge: View {
             }
 
             RoundedRectangle(cornerRadius: 1, style: .continuous)
-                .fill(Color.primary.opacity(0.4))
+                .fill(ink.opacity(0.4))
                 .frame(width: 2, height: 5)
         }
         .accessibilityElement(children: .ignore)

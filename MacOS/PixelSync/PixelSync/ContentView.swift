@@ -57,25 +57,27 @@ struct ContentView: View {
                 
                 if bleManager.connectionStatus.contains("Connesso") {
 
-                    // Segnale di Rete
+                    // Segnale di rete e batteria in un unico gruppo, così le icone restano equidistanti
                     HStack(spacing: 4) {
                         Text(bleManager.networkType).font(.system(size: 10, weight: .bold)).foregroundColor(.secondary).lineLimit(1).minimumScaleFactor(0.6)
-                        
+
                         if bleManager.isWifi {
                             Image(systemName: "wifi")
                                 .foregroundColor(.primary)
                         }
-                        
+
                         Image(systemName: "cellularbars", variableValue: Double(bleManager.signalStrength) / 4.0)
                             .foregroundColor(.primary)
+
+                        // Batteria, nello stile dell'indicatore di macOS accanto all'icona di PixelSync
+                        // +2: i simboli di sistema hanno margini interni diversi; così tacche→batteria
+                        // risulta visivamente uguale a Wi-Fi→tacche (~7,7 pt)
+                        BatteryBadge(
+                            level: Int(bleManager.batteryLevel.replacingOccurrences(of: "%", with: "")),
+                            isCharging: bleManager.isCharging
+                        )
+                        .padding(.leading, 2)
                     }
-                    
-                    // Batteria, nello stile dell'indicatore di macOS accanto all'icona di PixelSync
-                    BatteryBadge(
-                        level: Int(bleManager.batteryLevel.replacingOccurrences(of: "%", with: "")),
-                        isCharging: bleManager.isCharging
-                    )
-                    .padding(.leading, 4)
                 }
             }
             
