@@ -99,11 +99,11 @@ L’app macOS agisce come **Central / GATT Client** e vive nella Menu Bar.
 * **Configurazione disaccoppiata**: usa un file JSON locale per le regole di mapping delle app.
 
 <p align="center">
-  <img width="383" height="144" alt="PixelSync con hotspot remoto acceso" src="https://github.com/user-attachments/assets/59945b62-7730-47d1-bd6c-baf7cc546131" />
+  <img width="368" height="143" alt="PixelSync con hotspot remoto acceso" src="https://github.com/user-attachments/assets/3f0dd50c-9473-4a33-99d9-c407546afedb" />
 </p>
 
 <p align="center">
-  <img width="368" height="147" alt="PixelSync con il telefono su Wi-Fi" src="https://github.com/user-attachments/assets/7ecf1075-1fb9-4061-9bde-38b590590482" />
+  <img width="368" height="143" alt="PixelSync con il telefono su Wi-Fi" src="https://github.com/user-attachments/assets/575f7340-615e-4d43-b23a-65e0d9b7d379" />
 </p>
 
 ---
@@ -303,11 +303,11 @@ The macOS app acts as the **Central / GATT Client** and lives in the Menu Bar.
 * **Decoupled Configuration**: Uses a local JSON file for app mapping rules.
 
 <p align="center">
-  <img width="383" height="144" alt="PixelSync with remote hotspot on" src="https://github.com/user-attachments/assets/59945b62-7730-47d1-bd6c-baf7cc546131" />
+  <img width="368" height="143" alt="PixelSync with remote hotspot on" src="https://github.com/user-attachments/assets/3f0dd50c-9473-4a33-99d9-c407546afedb" />
 </p>
 
 <p align="center">
-  <img width="368" height="147" alt="PixelSync with the phone on Wi-Fi" src="https://github.com/user-attachments/assets/7ecf1075-1fb9-4061-9bde-38b590590482" />
+  <img width="368" height="143" alt="PixelSync with the phone on Wi-Fi" src="https://github.com/user-attachments/assets/575f7340-615e-4d43-b23a-65e0d9b7d379" />
 </p>
 
 ---
