@@ -63,6 +63,7 @@ L’obiettivo è offrire sincronizzazione di notifiche, telemetria e controllo r
 * 🔄 **Reconnection sync**: alla riconnessione Bluetooth, macOS richiede uno snapshot completo dello stato attuale per riallineare notifiche e telemetria.
 * 🛡️ **Filtro anti-doppioni**: le notifiche “summary” o raggruppate vengono filtrate; quando un’app aggiorna una notifica (es. nuovi messaggi nella stessa chat) quella sul Mac viene sostituita, non duplicata. Le notifiche permanenti (download, navigazione, musica) non vengono inoltrate, le chiamate in arrivo sì.
 * 🧹 **Dismiss bidirezionale**: una notifica aperta, chiusa con la X o rimossa su un lato (anche dall’app stessa, es. messaggio letto da un altro dispositivo) sparisce anche dall’altro.
+* 🔕 **Banner come sul telefono**: ogni notifica e ogni aggiornamento arrivano al Mac; il banner compare quando il telefono avviserebbe (canale a importanza *Alta* o *Predefinita*), mentre le notifiche di canali a importanza *Bassa/Minima* e gli aggiornamenti che l’app marca “avvisa solo la prima volta” (es. dopo una tua risposta) si aggiornano in silenzio nel Centro Notifiche. Il *Non disturbare* del telefono non conta: i banner sul Mac arrivano comunque.
 * 💬 **Pulsanti delle notifiche**: i pulsanti Android utilizzabili da remoto (Rispondi, Segna come letto, Archivia…) compaiono anche sulla notifica del Mac; le risposte si scrivono direttamente dalla notifica. I pulsanti che aprirebbero un’app sul telefono non vengono mostrati, quelli che eliminano qualcosa sono in rosso.
 * 🔐 **Collegamento cifrato**: Mac e telefono comunicano solo dopo l’abbinamento Bluetooth; PixelSync si collega sempre e solo al telefono abbinato.
 * 🖱️ **Apertura app dinamica**: il mapping tra package name Android e app/PWA su macOS è configurabile e salvato in un file JSON locale.
@@ -144,7 +145,7 @@ command=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
 I campi di ogni pacchetto sono separati da `\u001F`. Il pacchetto telemetrico è formattato in questo ordine:
 `Batteria | In carica | Rete (tipo di rete cellulare o "Wi-Fi") | Segnale | isWifi | isHotspotActive | Modello del telefono`
 
-Le notifiche vengono inoltrate come `POST | ID | Package | Pulsanti | Titolo | Testo` oppure `REMOVE | ID`; l'ID è stabile per tutta la vita della notifica Android.
+Le notifiche vengono inoltrate come `POST | ID | Package | Pulsanti | Titolo | Testo` (con banner), `UPDATE | …` con gli stessi campi (aggiornamento silenzioso) oppure `REMOVE | ID`; l'ID è stabile per tutta la vita della notifica Android.
 Il campo *Pulsanti* contiene fino a 3 pulsanti separati da `\u001E`, ognuno come `indice \u001D tipo \u001D nome` (tipo `R` risposta con testo, `D` distruttivo, `A` azione).
 
 Il canale comandi supporta `HOTSPOT_ON`, `HOTSPOT_OFF`, `SYNC_REQ`, `MAC_NAME | nome del computer`, `KILL | ID` e `ACTION | ID | indice pulsante [| testo risposta]`.
@@ -159,7 +160,7 @@ I pacchetti vengono inviati uno alla volta e, se superano l'MTU negoziato (massi
 
 ### Lato Android
 
-1. Compila l’APK in modalità **Release** tramite Android Studio.
+1. Compila l’APK in modalità **Release** tramite Android Studio. Facoltativo: per firmare automaticamente la release anche da terminale, aggiungi in `Android/local.properties` (escluso da git) `macsync.keystore`, `macsync.keyAlias` e `macsync.keychainService` / `macsync.keychainKeyService` con i nomi delle voci del Portachiavi che contengono le password (vedi `Android/app/build.gradle.kts`).
 2. Vai in *Impostazioni → App → MacSync → Batteria* e imposta **"Senza restrizioni"** (l'associazione come app compagna, sotto, non lo fa in automatico).
 3. Concedi i permessi richiesti al primo avvio: Dispositivi nelle vicinanze (Bluetooth) e Telefono (per il tipo di rete). La posizione non serve.
 4. Abilita **MacSync Notifiche** nell’Accesso alle Notifiche di sistema e seleziona le app desiderate dalla UI.
@@ -267,6 +268,7 @@ The goal is to offer notification synchronization, telemetry, and remote control
 * 🔄 **Reconnection Sync**: Upon Bluetooth reconnection, macOS requests a complete state snapshot to realign notifications and telemetry.
 * 🛡️ **Anti-Duplicate Filter**: "Summary" or grouped notifications are filtered out; when an app updates a notification (e.g. new messages in the same chat) the Mac notification is replaced, not duplicated. Ongoing notifications (downloads, navigation, music) are not forwarded, incoming calls are.
 * 🧹 **Bidirectional Dismiss**: A notification opened, closed with the X or removed on one side (even by the app itself, e.g. a message read on another device) disappears on the other side too.
+* 🔕 **Banners like on the phone**: every notification and every update reaches the Mac; a banner appears when the phone would alert (channel importance *High* or *Default*), while notifications from *Low/Min* importance channels and updates the app marks “alert only once” (e.g. after your reply) are updated silently in Notification Center. The phone’s *Do Not Disturb* is ignored: banners on the Mac still arrive.
 * 💬 **Notification Actions**: Android actions that can be used remotely (Reply, Mark as read, Archive…) also appear on the Mac notification; replies are typed directly in the notification. Actions that would open an app on the phone are not shown, delete-type actions are red.
 * 🔐 **Encrypted Link**: Mac and phone only communicate after Bluetooth pairing; PixelSync always connects to the paired phone only.
 * 🖱️ **Dynamic App Launching**: The mapping between Android package names and macOS apps/PWAs is configurable and saved in a local JSON file.
@@ -348,7 +350,7 @@ command=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
 Fields in every packet are separated by `\u001F`. The telemetry packet is formatted in this order:
 `Battery | Charging | Network (cellular network type or "Wi-Fi") | Signal | isWifi | isHotspotActive | Phone model`
 
-Notifications are forwarded as `POST | ID | Package | Actions | Title | Text` or `REMOVE | ID`; the ID is stable for the whole life of the Android notification.
+Notifications are forwarded as `POST | ID | Package | Actions | Title | Text` (with banner), `UPDATE | …` with the same fields (silent update) or `REMOVE | ID`; the ID is stable for the whole life of the Android notification.
 The *Actions* field holds up to 3 actions separated by `\u001E`, each as `index \u001D type \u001D name` (type `R` text reply, `D` destructive, `A` action).
 
 The command channel supports `HOTSPOT_ON`, `HOTSPOT_OFF`, `SYNC_REQ`, `MAC_NAME | computer name`, `KILL | ID` and `ACTION | ID | action index [| reply text]`.
@@ -363,7 +365,7 @@ Packets are sent one at a time and, if they exceed the negotiated MTU (512 bytes
 
 ### Android Side
 
-1. Compile the APK in **Release** mode via Android Studio.
+1. Compile the APK in **Release** mode via Android Studio. Optional: to sign the release automatically from the command line too, add `macsync.keystore`, `macsync.keyAlias` and `macsync.keychainService` / `macsync.keychainKeyService` (names of the Keychain items holding the passwords) to `Android/local.properties` (git-ignored; see `Android/app/build.gradle.kts`).
 2. Go to *Settings → Apps → MacSync → Battery* and set it to **"Unrestricted"** (the companion association below does not do it automatically).
 3. Grant required permissions on first launch: Nearby devices (Bluetooth) and Phone (for the network type). Location is not needed.
 4. Enable **MacSync Notifications** in the system's Notification Access and select the desired apps from the UI.

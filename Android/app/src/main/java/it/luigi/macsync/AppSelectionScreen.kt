@@ -4,16 +4,15 @@ import android.content.Context
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape // <-- AGGIUNTO IMPORT MANCANTE
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,12 +25,14 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asComposePath
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.graphics.shapes.Morph
 import androidx.graphics.shapes.RoundedPolygon
@@ -112,6 +113,13 @@ fun AppSelectionScreen() {
     var appList by remember { mutableStateOf<List<AppItem>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var searchQuery by remember { mutableStateOf("") }
+    // App di cui è aperta la schermata dei canali (null = elenco delle app)
+    var openedApp by remember { mutableStateOf<AppItem?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun updateEnabled(packageName: String, enabled: Boolean) {
+        appList = appList.map { if (it.packageName == packageName) it.copy(isEnabled = enabled) else it }
+    }
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
@@ -145,6 +153,15 @@ fun AppSelectionScreen() {
                 isLoading = false
             }
         }
+    }
+
+    openedApp?.let { app ->
+        ChannelsScreen(
+            app = appList.firstOrNull { it.packageName == app.packageName } ?: app,
+            onBack = { openedApp = null },
+            onAppEnabledChanged = { enabled -> updateEnabled(app.packageName, enabled) }
+        )
+        return
     }
 
     val filteredList = if (searchQuery.isEmpty()) {
@@ -209,26 +226,21 @@ fun AppSelectionScreen() {
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(innerPadding),
+                    .padding(innerPadding)
+                    .nestedScroll(rememberSheetSafeScroll()),
             ) {
                 items(filteredList, key = { it.packageName }) { appItem ->
-                    AppRow(appItem = appItem) { isChecked ->
-                        appList = appList.map {
-                            if (it.packageName == appItem.packageName) it.copy(isEnabled = isChecked) else it
+                    AppRow(
+                        appItem = appItem,
+                        onOpenChannels = { openedApp = appItem },
+                        onCheckedChange = { isChecked ->
+                            updateEnabled(appItem.packageName, isChecked)
+                            // Le scelte sui canali restano salvate quando l'app viene spenta (vedi ChannelSettings)
+                            scope.launch(Dispatchers.IO) {
+                                ChannelSettings.setAppEnabled(context, appItem.packageName, isChecked)
+                            }
                         }
-
-                        val editor = prefs.edit()
-                        val currentSaved = prefs.getStringSet("enabled_apps", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
-
-                        if (isChecked) {
-                            currentSaved.add(appItem.packageName)
-                        } else {
-                            currentSaved.remove(appItem.packageName)
-                        }
-
-                        editor.putStringSet("enabled_apps", currentSaved)
-                        editor.apply()
-                    }
+                    )
                 }
                 item {
                     Spacer(modifier = Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
@@ -238,15 +250,13 @@ fun AppSelectionScreen() {
     }
 }
 
+// Tocco sulla riga: apre i canali dell'app. Interruttore: accende/spegne l'app.
 @Composable
-fun AppRow(appItem: AppItem, onCheckedChange: (Boolean) -> Unit) {
+fun AppRow(appItem: AppItem, onOpenChannels: () -> Unit, onCheckedChange: (Boolean) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .toggleable(
-                value = appItem.isEnabled,
-                onValueChange = { onCheckedChange(it) }
-            )
+            .clickable(onClick = onOpenChannels)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -263,30 +273,14 @@ fun AppRow(appItem: AppItem, onCheckedChange: (Boolean) -> Unit) {
             Text(text = appItem.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
-        Switch(
-            checked = appItem.isEnabled,
-            onCheckedChange = null,
-            colors = SwitchDefaults.colors(
-                checkedIconColor = MaterialTheme.colorScheme.primary,
-                uncheckedIconColor = MaterialTheme.colorScheme.surfaceVariant
-            ),
-            thumbContent = if (appItem.isEnabled) {
-                {
-                    Icon(
-                        imageVector = Icons.Rounded.Check,
-                        contentDescription = null,
-                        modifier = Modifier.size(SwitchDefaults.IconSize)
-                    )
-                }
-            } else {
-                {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = null,
-                        modifier = Modifier.size(SwitchDefaults.IconSize)
-                    )
-                }
-            }
+        // Come nelle impostazioni di Android: freccetta = c'è un sottomenù, separatore = l'interruttore è un tocco a parte
+        Icon(
+            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+            contentDescription = "Canali",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        VerticalDivider(modifier = Modifier.height(32.dp).padding(horizontal = 12.dp))
+
+        MacSyncSwitch(checked = appItem.isEnabled, onCheckedChange = onCheckedChange)
     }
 }

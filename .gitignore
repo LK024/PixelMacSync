@@ -7,3 +7,6 @@ xcuserdata/
 # UUID BLE privati (vedi README, sezione Protocollo BLE & UUIDs)
 Android/app/src/main/assets/ble_uuids.properties
 MacOS/PixelSync/PixelSync/LocalUUIDs.plist
+
+# Piani di lavoro locali (non pubblicati)
+docs/piani/
