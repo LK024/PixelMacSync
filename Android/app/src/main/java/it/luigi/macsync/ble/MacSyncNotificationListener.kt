@@ -9,9 +9,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Bundle
+import android.os.Process
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import it.luigi.macsync.ChannelInfo
+import it.luigi.macsync.ChannelSettings
 
 class MacSyncNotificationListener : NotificationListenerService() {
 
@@ -29,6 +32,56 @@ class MacSyncNotificationListener : NotificationListenerService() {
 
         // ID breve e stabile per ogni notifica Android: se l'app la aggiorna, sul Mac viene sostituita invece di duplicata
         private fun macIdFor(key: String): String = Integer.toHexString(key.hashCode())
+
+        // Il listener collegato al sistema: serve alla schermata dei canali per leggerne l'elenco
+        @Volatile
+        private var connected: MacSyncNotificationListener? = null
+
+        // Tutti i canali di un'app, divisi per gruppo. Android lo concede solo con il Mac associato come
+        // dispositivo compagno: senza associazione, o con il listener non collegato, restituisce null.
+        fun allChannels(packageName: String): List<ChannelInfo>? {
+            val listener = connected ?: return null
+            return try {
+                val user = Process.myUserHandle()
+                val groups = listener.getNotificationChannelGroups(packageName, user).associateBy { it.id }
+                listener.getNotificationChannels(packageName, user).map { channel ->
+                    val group = channel.group?.let { groups[it] }
+                    ChannelInfo(
+                        id = channel.id,
+                        name = channel.name?.toString() ?: channel.id,
+                        description = channel.description,
+                        groupName = group?.name?.toString(),
+                        blockedOnPhone = channel.importance == NotificationManager.IMPORTANCE_NONE || group?.isBlocked == true
+                    )
+                }
+            } catch (e: SecurityException) {
+                Log.w("MacSync", "Elenco canali non disponibile (Mac non associato?): ${e.message}")
+                null
+            }
+        }
+
+        private fun seenKey(packageName: String) = "seen_channels_$packageName"
+
+        // Ripiego senza associazione: i canali da cui è già arrivata almeno una notifica ("id␟nome")
+        fun seenChannels(context: Context, packageName: String): List<ChannelInfo>? {
+            val prefs = context.getSharedPreferences("MacSync_Prefs", Context.MODE_PRIVATE)
+            val seen = prefs.getStringSet(seenKey(packageName), emptySet()).orEmpty()
+            if (seen.isEmpty()) return null
+            return seen.map { entry ->
+                val id = entry.substringBefore(SEPARATOR)
+                ChannelInfo(id, entry.substringAfter(SEPARATOR, id), null, null, blockedOnPhone = false)
+            }.sortedBy { it.name.lowercase() }
+        }
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        connected = this
+    }
+
+    override fun onListenerDisconnected() {
+        if (connected === this) connected = null
+        super.onListenerDisconnected()
     }
 
     // --- 0. RICEVITORE DEL COMANDO "KILL" DAL MAC ---
@@ -79,6 +132,7 @@ class MacSyncNotificationListener : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        if (connected === this) connected = null
         unregisterReceiver(killReceiver)
         unregisterReceiver(syncReceiver)
         unregisterReceiver(actionReceiver)
@@ -141,6 +195,13 @@ class MacSyncNotificationListener : NotificationListenerService() {
 
         val notification = sbn.notification
 
+        // Canali scelti nella schermata dell'app: quelli disattivati non arrivano al Mac
+        rememberSeenChannel(sbn.key, packageName)
+        if (!ChannelSettings.isChannelEnabled(this, packageName, notification.channelId)) {
+            Log.d("MacSync", "Notifica ${macIdFor(sbn.key)} ($packageName): canale disattivato in MacSync -> non inoltrata")
+            return null
+        }
+
         // Filtro anti-doppioni
         val isGroupSummary = (notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0
         if (isGroupSummary) return null
@@ -181,6 +242,17 @@ class MacSyncNotificationListener : NotificationListenerService() {
         // I pulsanti stanno prima di titolo e testo: se il pacchetto va troncato si perde la coda del testo, non i pulsanti
         val actions = encodeActions(notification)
         return "$packetType$SEPARATOR$macId$SEPARATOR$packageName$SEPARATOR$actions$SEPARATOR${clean(title)}$SEPARATOR${clean(text)}"
+    }
+
+    // Annota il canale di una notifica arrivata, per mostrarlo anche senza l'elenco completo dei canali
+    private fun rememberSeenChannel(key: String, packageName: String) {
+        val ranking = Ranking()
+        if (currentRanking?.getRanking(key, ranking) != true) return
+        val channel = ranking.channel ?: return
+        val prefs = applicationContext.getSharedPreferences("MacSync_Prefs", Context.MODE_PRIVATE)
+        val seen = prefs.getStringSet(seenKey(packageName), emptySet()).orEmpty()
+        if (seen.any { it.substringBefore(SEPARATOR) == channel.id }) return
+        prefs.edit().putStringSet(seenKey(packageName), seen + "${channel.id}$SEPARATOR${channel.name ?: channel.id}").apply()
     }
 
     // Importanza del canale della notifica (impostata dall'app o da te), oppure null se non disponibile
