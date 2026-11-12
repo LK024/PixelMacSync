@@ -148,7 +148,7 @@ I campi di ogni pacchetto sono separati da `\u001F`. Il pacchetto telemetrico è
 Le notifiche vengono inoltrate come `POST | ID | Package | Pulsanti | Titolo | Testo` (con banner), `UPDATE | …` con gli stessi campi (aggiornamento silenzioso) oppure `REMOVE | ID`; l'ID è stabile per tutta la vita della notifica Android.
 Il campo *Pulsanti* contiene fino a 3 pulsanti separati da `\u001E`, ognuno come `indice \u001D tipo \u001D nome` (tipo `R` risposta con testo, `D` distruttivo, `A` azione).
 
-Il canale comandi supporta `HOTSPOT_ON`, `HOTSPOT_OFF`, `SYNC_REQ`, `MAC_NAME | nome del computer`, `KILL | ID` e `ACTION | ID | indice pulsante [| testo risposta]`.
+Il canale comandi supporta `HOTSPOT_ON`, `HOTSPOT_OFF`, `SYNC_REQ`, `MTU | valore` (inviato dal Mac prima di `SYNC_REQ`), `MAC_NAME | nome del computer`, `KILL | ID` e `ACTION | ID | indice pulsante [| testo risposta]`.
 I comandi possono arrivare a 512 byte: oltre l'MTU vengono inviati come scrittura lunga BLE e ricomposti dal telefono.
 
 Tutte le caratteristiche richiedono un **link cifrato**: solo un Mac abbinato al telefono può leggere telemetria e notifiche o inviare comandi.
@@ -353,7 +353,7 @@ Fields in every packet are separated by `\u001F`. The telemetry packet is format
 Notifications are forwarded as `POST | ID | Package | Actions | Title | Text` (with banner), `UPDATE | …` with the same fields (silent update) or `REMOVE | ID`; the ID is stable for the whole life of the Android notification.
 The *Actions* field holds up to 3 actions separated by `\u001E`, each as `index \u001D type \u001D name` (type `R` text reply, `D` destructive, `A` action).
 
-The command channel supports `HOTSPOT_ON`, `HOTSPOT_OFF`, `SYNC_REQ`, `MAC_NAME | computer name`, `KILL | ID` and `ACTION | ID | action index [| reply text]`.
+The command channel supports `HOTSPOT_ON`, `HOTSPOT_OFF`, `SYNC_REQ`, `MTU | value` (sent by the Mac before `SYNC_REQ`), `MAC_NAME | computer name`, `KILL | ID` and `ACTION | ID | action index [| reply text]`.
 Commands can be up to 512 bytes: beyond the MTU they are sent as a BLE long write and reassembled by the phone.
 
 All characteristics require an **encrypted link**: only a Mac paired with the phone can read telemetry and notifications or send commands.

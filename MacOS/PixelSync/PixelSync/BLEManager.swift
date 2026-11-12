@@ -425,7 +425,15 @@ extension BLEManager: CBPeripheralDelegate {
                 // --- FIX: SYNC A FREDDO (Reconnection Sync) ---
                 UNUserNotificationCenter.current().removeAllDeliveredNotifications()
                 print("MacSync: Centro notifiche Mac svuotato per la sincronizzazione.")
-                
+
+                // L'MTU vero del collegamento, prima di SYNC_REQ: Android non sempre lo comunica a MacSync
+                // e senza questo il telefono taglierebbe ogni pacchetto a 20 byte (notifiche e batteria scartate)
+                let mtu = peripheral.maximumWriteValueLength(for: .withoutResponse) + 3
+                if let data = "MTU\u{001F}\(mtu)".data(using: .utf8) {
+                    peripheral.writeValue(data, for: characteristic, type: .withResponse)
+                    print("MacSync: MTU \(mtu) comunicato ad Android.")
+                }
+
                 let syncCommand = "SYNC_REQ"
                 if let data = syncCommand.data(using: .utf8) {
                     peripheral.writeValue(data, for: characteristic, type: .withResponse)

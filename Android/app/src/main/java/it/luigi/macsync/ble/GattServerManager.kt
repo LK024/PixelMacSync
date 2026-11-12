@@ -277,6 +277,8 @@ class GattServerManager private constructor(private val context: Context) {
         val bytes = payload.toByteArray(Charsets.UTF_8)
         val maxLength = minOf(mtu - 3, 512)
         if (bytes.size <= maxLength) return bytes
+        // Diagnostica senza contenuti: un taglio con MTU 23 vuol dire che l'MTU vero non è arrivato
+        Log.w("MacSync", "Pacchetto tagliato: ${bytes.size} byte, MTU $mtu")
 
         val ellipsis = "…".toByteArray(Charsets.UTF_8)
         var cut = maxLength - ellipsis.size
@@ -398,7 +400,7 @@ class GattServerManager private constructor(private val context: Context) {
                 return
             }
 
-            handleCommand(String(value, Charsets.UTF_8))
+            handleCommand(device, String(value, Charsets.UTF_8))
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
             }
@@ -407,13 +409,13 @@ class GattServerManager private constructor(private val context: Context) {
         override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
             super.onExecuteWrite(device, requestId, execute)
             val buffer = preparedWrites.remove(device.address)
-            if (execute && buffer != null) handleCommand(String(buffer.toByteArray(), Charsets.UTF_8))
+            if (execute && buffer != null) handleCommand(device, String(buffer.toByteArray(), Charsets.UTF_8))
             gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
         }
     }
 
     // --- ⚙️ GESTIONE COMANDI IN INGRESSO DAL MAC ---
-    private fun handleCommand(fullCommand: String) {
+    private fun handleCommand(device: BluetoothDevice, fullCommand: String) {
         val parts = fullCommand.split("\u001F")
         val commandType = parts[0]
         // Solo il tipo di comando nel log: le risposte contengono testo privato
@@ -463,6 +465,16 @@ class GattServerManager private constructor(private val context: Context) {
                         }
                         applyMacAlias()
                     }
+                }
+            }
+            // MTU␟valore: l'MTU vero del collegamento, comunicato dal Mac prima di SYNC_REQ.
+            // Android chiama onMtuChanged solo se lo scambio lo chiede il Mac: se lo chiede prima il telefono
+            // (per un'altra app collegata al Mac) non avvisa MacSync, che resterebbe a 23 e taglierebbe tutto a 20 byte.
+            "MTU" -> {
+                val mtu = parts.getOrNull(1)?.trim()?.toIntOrNull()
+                if (mtu != null && mtu >= 23) {
+                    Log.d("MacSync", "MTU comunicato dal Mac: $mtu")
+                    mainHandler.post { mtuByAddress[device.address] = mtu }
                 }
             }
             // --- NUOVO COMANDO: RICHIESTA DI SINCRONIZZAZIONE A FREDDO ---
