@@ -1,6 +1,7 @@
 package it.luigi.macsync.ble
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.RemoteInput
 import android.content.BroadcastReceiver
@@ -8,10 +9,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Bundle
-import android.os.SystemClock
+import android.os.Process
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import it.luigi.macsync.ChannelInfo
+import it.luigi.macsync.ChannelSettings
 
 class MacSyncNotificationListener : NotificationListenerService() {
 
@@ -21,18 +24,64 @@ class MacSyncNotificationListener : NotificationListenerService() {
         private const val ACTION_SEPARATOR = "\u001E"
         private const val ACTION_FIELD_SEPARATOR = "\u001D"
         private const val MAX_ACTIONS = 3
-        // Dopo un pulsante premuto dal Mac, l'app aggiorna la notifica (es. "Tu: ..."): non la rimandiamo al Mac
-        private const val SUPPRESS_AFTER_ACTION_MS = 5_000L
 
         // ID del Mac -> key della notifica Android, per il comando KILL
         private val macIdToKey = mutableMapOf<String, String>()
-        // Ultimo "titolo + testo" inviato per ogni key: gli aggiornamenti identici non rimbalzano sul Mac
-        private val lastSentContent = mutableMapOf<String, String>()
-        // Key -> istante (elapsedRealtime) fino a cui ignorare gli aggiornamenti dopo un pulsante premuto dal Mac
-        private val suppressedUntil = mutableMapOf<String, Long>()
+        // Notifiche già inoltrate al Mac: servono a riconoscere gli aggiornamenti e a rispecchiare le rimozioni
+        private val forwardedKeys = mutableSetOf<String>()
 
         // ID breve e stabile per ogni notifica Android: se l'app la aggiorna, sul Mac viene sostituita invece di duplicata
         private fun macIdFor(key: String): String = Integer.toHexString(key.hashCode())
+
+        // Il listener collegato al sistema: serve alla schermata dei canali per leggerne l'elenco
+        @Volatile
+        private var connected: MacSyncNotificationListener? = null
+
+        // Tutti i canali di un'app, divisi per gruppo. Android lo concede solo con il Mac associato come
+        // dispositivo compagno: senza associazione, o con il listener non collegato, restituisce null.
+        fun allChannels(packageName: String): List<ChannelInfo>? {
+            val listener = connected ?: return null
+            return try {
+                val user = Process.myUserHandle()
+                val groups = listener.getNotificationChannelGroups(packageName, user).associateBy { it.id }
+                listener.getNotificationChannels(packageName, user).map { channel ->
+                    val group = channel.group?.let { groups[it] }
+                    ChannelInfo(
+                        id = channel.id,
+                        name = channel.name?.toString() ?: channel.id,
+                        description = channel.description,
+                        groupName = group?.name?.toString(),
+                        blockedOnPhone = channel.importance == NotificationManager.IMPORTANCE_NONE || group?.isBlocked == true
+                    )
+                }
+            } catch (e: SecurityException) {
+                Log.w("MacSync", "Elenco canali non disponibile (Mac non associato?): ${e.message}")
+                null
+            }
+        }
+
+        private fun seenKey(packageName: String) = "seen_channels_$packageName"
+
+        // Ripiego senza associazione: i canali da cui è già arrivata almeno una notifica ("id␟nome")
+        fun seenChannels(context: Context, packageName: String): List<ChannelInfo>? {
+            val prefs = context.getSharedPreferences("MacSync_Prefs", Context.MODE_PRIVATE)
+            val seen = prefs.getStringSet(seenKey(packageName), emptySet()).orEmpty()
+            if (seen.isEmpty()) return null
+            return seen.map { entry ->
+                val id = entry.substringBefore(SEPARATOR)
+                ChannelInfo(id, entry.substringAfter(SEPARATOR, id), null, null, blockedOnPhone = false)
+            }.sortedBy { it.name.lowercase() }
+        }
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        connected = this
+    }
+
+    override fun onListenerDisconnected() {
+        if (connected === this) connected = null
+        super.onListenerDisconnected()
     }
 
     // --- 0. RICEVITORE DEL COMANDO "KILL" DAL MAC ---
@@ -83,6 +132,7 @@ class MacSyncNotificationListener : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        if (connected === this) connected = null
         unregisterReceiver(killReceiver)
         unregisterReceiver(syncReceiver)
         unregisterReceiver(actionReceiver)
@@ -96,8 +146,8 @@ class MacSyncNotificationListener : NotificationListenerService() {
         val enabledApps = enabledApps()
 
         for (sbn in currentNotifications) {
-            // Il Mac ha appena svuotato il suo centro notifiche: reinviamo tutto, anche se già inviato prima
-            val payload = buildPostPayload(sbn, enabledApps, force = true) ?: continue
+            // Il Mac ha appena svuotato il suo centro notifiche: reinviamo tutto, sempre con banner
+            val payload = buildNotificationPayload(sbn, enabledApps, isSnapshot = true) ?: continue
             sendToGattServer(payload)
         }
         Log.d("MacSync", "Snapshot inviato con successo al Mac.")
@@ -105,7 +155,7 @@ class MacSyncNotificationListener : NotificationListenerService() {
 
     // --- 3. QUANDO ARRIVA (O SI AGGIORNA) UNA NOTIFICA ---
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val payload = buildPostPayload(sbn, enabledApps(), force = false) ?: return
+        val payload = buildNotificationPayload(sbn, enabledApps(), isSnapshot = false) ?: return
         sendToGattServer(payload)
     }
 
@@ -114,21 +164,43 @@ class MacSyncNotificationListener : NotificationListenerService() {
         // Qualunque motivo conta (letta da un altro dispositivo, annullata dall'app, scaduta, cliccata...),
         // ma solo per le notifiche che abbiamo effettivamente inviato al Mac
         val key = sbn.key
-        suppressedUntil.remove(key)
-        if (lastSentContent.remove(key) == null) return
+        if (!forwardedKeys.remove(key)) return
 
         val macId = macIdFor(key)
+        // Log diagnostico (senza contenuti): perché Android ha tolto la notifica
+        Log.d("MacSync", "Rimossa $macId (${sbn.packageName}): motivo=${removalReasonName(reason)} -> REMOVE")
         macIdToKey.remove(macId)
         sendToGattServer("REMOVE$SEPARATOR$macId")
     }
 
-    // Restituisce il pacchetto POST da inoltrare, oppure null se la notifica va ignorata
-    private fun buildPostPayload(sbn: StatusBarNotification, enabledApps: Set<String>, force: Boolean): String? {
+    private fun removalReasonName(reason: Int): String = when (reason) {
+        REASON_CLICK -> "clic"
+        REASON_CANCEL -> "chiusa dall'utente"
+        REASON_CANCEL_ALL -> "cancella tutte"
+        REASON_APP_CANCEL -> "chiusa dall'app"
+        REASON_APP_CANCEL_ALL -> "chiuse tutte dall'app"
+        REASON_LISTENER_CANCEL -> "chiusa da MacSync"
+        REASON_GROUP_SUMMARY_CANCELED -> "riepilogo di gruppo chiuso"
+        REASON_SNOOZED -> "posticipata"
+        REASON_TIMEOUT -> "scaduta"
+        else -> "codice $reason"
+    }
+
+    // Restituisce il pacchetto da inoltrare (POST con banner, UPDATE passivo), oppure null se la notifica va ignorata.
+    // Ogni notifica nuova e ogni aggiornamento vengono inoltrati; banner o silenzio li decidono Android e l'app.
+    private fun buildNotificationPayload(sbn: StatusBarNotification, enabledApps: Set<String>, isSnapshot: Boolean): String? {
         val packageName = sbn.packageName
         if (packageName == "android" || packageName == "com.android.systemui") return null
         if (!enabledApps.contains(packageName)) return null
 
         val notification = sbn.notification
+
+        // Canali scelti nella schermata dell'app: quelli disattivati non arrivano al Mac
+        rememberSeenChannel(sbn.key, packageName)
+        if (!ChannelSettings.isChannelEnabled(this, packageName, notification.channelId)) {
+            Log.d("MacSync", "Notifica ${macIdFor(sbn.key)} ($packageName): canale disattivato in MacSync -> non inoltrata")
+            return null
+        }
 
         // Filtro anti-doppioni
         val isGroupSummary = (notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0
@@ -149,19 +221,44 @@ class MacSyncNotificationListener : NotificationListenerService() {
         if (title.isBlank() && text.isBlank()) return null
 
         val key = sbn.key
-        val content = title + SEPARATOR + text
-        if (!force && lastSentContent[key] == content) return null
-        lastSentContent[key] = content
-
-        // Subito dopo un pulsante premuto dal Mac l'aggiornamento resta solo sul telefono: il Mac ha già chiuso la notifica
-        if (!force && SystemClock.elapsedRealtime() < (suppressedUntil[key] ?: 0L)) return null
-
+        val isUpdate = !forwardedKeys.add(key)
         val macId = macIdFor(key)
         macIdToKey[macId] = key
 
+        // Come sul telefono, ignorando il Non disturbare (non si usa il filtro delle interruzioni):
+        // - canale a importanza Bassa/Minima → silenziosa anche sul Mac
+        // - aggiornamento che l'app marca "avvisa solo la prima volta" → silenzioso anche sul Mac
+        // In ogni altro caso (importanza Predefinita/Alta o sconosciuta) banner. La riconnessione resta sempre con banner.
+        val importance = channelImportance(key)
+        val onlyAlertOnce = (notification.flags and Notification.FLAG_ONLY_ALERT_ONCE) != 0
+        val isLowImportance = importance in NotificationManager.IMPORTANCE_MIN..NotificationManager.IMPORTANCE_LOW
+        val isSilent = !isSnapshot && (isLowImportance || (isUpdate && onlyAlertOnce))
+        val packetType = if (isSilent) "UPDATE" else "POST"
+
+        // Log diagnostico (senza contenuti): per il collaudo
+        Log.d("MacSync", "Notifica $macId ($packageName): ${if (isUpdate) "aggiornamento" else "nuova"} " +
+            "importanza=$importance soloPrimaVolta=$onlyAlertOnce snapshot=$isSnapshot -> $packetType")
+
         // I pulsanti stanno prima di titolo e testo: se il pacchetto va troncato si perde la coda del testo, non i pulsanti
         val actions = encodeActions(notification)
-        return "POST$SEPARATOR$macId$SEPARATOR$packageName$SEPARATOR$actions$SEPARATOR${clean(title)}$SEPARATOR${clean(text)}"
+        return "$packetType$SEPARATOR$macId$SEPARATOR$packageName$SEPARATOR$actions$SEPARATOR${clean(title)}$SEPARATOR${clean(text)}"
+    }
+
+    // Annota il canale di una notifica arrivata, per mostrarlo anche senza l'elenco completo dei canali
+    private fun rememberSeenChannel(key: String, packageName: String) {
+        val ranking = Ranking()
+        if (currentRanking?.getRanking(key, ranking) != true) return
+        val channel = ranking.channel ?: return
+        val prefs = applicationContext.getSharedPreferences("MacSync_Prefs", Context.MODE_PRIVATE)
+        val seen = prefs.getStringSet(seenKey(packageName), emptySet()).orEmpty()
+        if (seen.any { it.substringBefore(SEPARATOR) == channel.id }) return
+        prefs.edit().putStringSet(seenKey(packageName), seen + "${channel.id}$SEPARATOR${channel.name ?: channel.id}").apply()
+    }
+
+    // Importanza del canale della notifica (impostata dall'app o da te), oppure null se non disponibile
+    private fun channelImportance(key: String): Int? {
+        val ranking = Ranking()
+        return if (currentRanking?.getRanking(key, ranking) == true) ranking.importance else null
     }
 
     // Solo i pulsanti utilizzabili da remoto: niente pulsanti che aprono un'app (Android li blocca da background),
@@ -194,7 +291,6 @@ class MacSyncNotificationListener : NotificationListenerService() {
         val freeFormInputs = action.remoteInputs?.filter { it.allowFreeFormInput }.orEmpty()
         if (freeFormInputs.isNotEmpty() && replyText == null) return
 
-        suppressedUntil[key] = SystemClock.elapsedRealtime() + SUPPRESS_AFTER_ACTION_MS
         try {
             if (replyText != null && freeFormInputs.isNotEmpty()) {
                 // Come una risposta scritta dalla tendina: il testo viaggia nell'intent come risultato del RemoteInput

@@ -481,8 +481,9 @@ extension BLEManager: CBPeripheralDelegate {
                 
                 let action = parts[0]
                 
-                // POST␟ID␟Package␟Pulsanti␟Titolo␟Testo
-                if action == "POST" && parts.count >= 6 {
+                // POST␟ID␟Package␟Pulsanti␟Titolo␟Testo (con banner)
+                // UPDATE con gli stessi campi: aggiornamento silenzioso, es. la notifica con la tua risposta
+                if (action == "POST" || action == "UPDATE") && parts.count >= 6 {
                     let notifId = parts[1]
                     let bundleId = parts[2]
                     let actionsField = parts[3]
@@ -492,7 +493,12 @@ extension BLEManager: CBPeripheralDelegate {
                     let content = UNMutableNotificationContent()
                     content.title = title
                     content.body = body
-                    content.sound = UNNotificationSound.default
+                    if action == "UPDATE" {
+                        // Sostituisce la notifica esistente solo nel Centro Notifiche: niente banner, niente suono
+                        content.interruptionLevel = .passive
+                    } else {
+                        content.sound = UNNotificationSound.default
+                    }
                     content.categoryIdentifier = categoryIdentifier(forActions: actionsField)
 
                     content.userInfo = [
@@ -570,8 +576,8 @@ extension BLEManager {
                 DispatchQueue.main.async {
                     self.sendAction(index: actionIndex, replyText: replyText, for: notifId)
                 }
-                // Come su iOS: dopo l'azione la notifica sparisce dal Mac
-                center.removeDeliveredNotifications(withIdentifiers: [notifId])
+                // Nessuna azione sulla notifica qui: sarà il telefono ad aggiornarla (UPDATE/POST) o a chiuderla (REMOVE).
+                // Non riproporla mentre macOS sta ancora chiudendo il campo di risposta: blocca il Centro Notifiche.
             }
         }
 
@@ -710,6 +716,11 @@ extension BLEManager {
     }
     
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound])
+        // Anche con il pannello di PixelSync aperto, le notifiche passive (aggiornamenti silenziosi) vanno solo nel Centro Notifiche
+        if notification.request.content.interruptionLevel == .passive {
+            completionHandler([.list])
+        } else {
+            completionHandler([.banner, .sound])
+        }
     }
 }
